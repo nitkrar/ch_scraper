@@ -78,28 +78,41 @@ else
     echo "  GUI (Tk):   MISSING (see warning above)"
 fi
 
+# Create Desktop shortcut (macOS only)
+if [ "$TK_OK" = true ] && [ "$(uname)" = "Darwin" ]; then
+    DESKTOP="$HOME/Desktop"
+    APP_PATH="$DESKTOP/CH Bulk.app"
+
+    if [ ! -d "$APP_PATH" ]; then
+        echo ""
+        echo "Creating Desktop shortcut..."
+        osacompile -o "$APP_PATH" -e "
+            do shell script \"cd '$SCRIPT_DIR' && .venv/bin/python -m ch_bulk.gui &> /dev/null &\"
+        " 2>/dev/null
+
+        if [ -d "$APP_PATH" ]; then
+            echo "  Desktop shortcut: OK (CH Bulk.app)"
+        else
+            echo "  Desktop shortcut: SKIPPED (osacompile not available)"
+        fi
+    else
+        echo "  Desktop shortcut: Already exists"
+    fi
+fi
+
 echo ""
 echo "========================================="
 echo "  Setup complete!"
 echo "========================================="
 echo ""
-echo "To get started, run:"
+echo "To get started:"
 echo ""
-echo "  source .venv/bin/activate"
+echo "  Double-click 'CH Bulk' on your Desktop"
+echo "  (or run: source .venv/bin/activate && ch-bulk ui)"
 echo ""
-echo "Then either use the CLI:"
+echo "CLI commands (after activating venv):"
 echo ""
 echo "  ch-bulk sync              # Download and build database"
 echo "  ch-bulk query 62012       # Search by SIC code"
 echo "  ch-bulk info              # Show database stats"
-echo ""
-echo "Or use the Python API:"
-echo ""
-echo "  python -c \""
-echo "  from ch_bulk import ChBulk"
-echo "  ch = ChBulk()"
-echo "  ch.sync()"
-echo "  companies = ch.query('62012')"
-echo "  print(f'Found {len(companies)} companies')"
-echo "  \""
 echo ""
