@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ch-bulk"
+version = "0.1.0"
+description = "Download and query UK Companies House bulk data by SIC code"
+requires-python = ">=3.12"
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["companies-house", "uk", "sic-code", "bulk-data", "duckdb"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+]
+dependencies = [
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.0",
+    "duckdb>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nitkrar/ch_scraper"
+Issues = "https://github.com/nitkrar/ch_scraper/issues"
+
+[project.scripts]
+ch-bulk = "ch_bulk.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["ch_bulk*"]
