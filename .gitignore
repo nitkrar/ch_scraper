@@ -35,6 +35,10 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.envrc
+
+# Claude Code (session data)
+.claude/
 
 # Build artifacts
 .build-venv/
