@@ -1,0 +1,16 @@
+{
+  "api_keys": {
+    "companies_house": "CH_API_KEY_HERE",
+    "cqc": "CQC_API_KEY_HERE"
+  },
+  "llm": {
+    "provider": "llamacpp",
+    "endpoint": "http://localhost:9741/v1",
+    "model": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+    "context": 16384,
+    "max_tokens": 400,
+    "temperature": 0.1,
+    "classifier_workers": 3,
+    "playwright_fallback": null
+  }
+}

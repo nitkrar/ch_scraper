@@ -251,6 +251,7 @@ def _build_filter_where(
     year_from: int | None = None,
     year_to: int | None = None,
     country: str | None = None,
+    is_active: bool | None = None,
 ) -> tuple[str, list]:
     """Build a WHERE clause from the common filter parameters.
 
@@ -290,6 +291,10 @@ def _build_filter_where(
         conditions.append("country_of_origin = ?")
         params.append(country)
 
+    if is_active is not None:
+        conditions.append("is_active = ?")
+        params.append(bool(is_active))
+
     if conditions:
         where_sql = " WHERE " + " AND ".join(conditions)
     else:
@@ -308,6 +313,7 @@ def query_companies(
     year_from: int | None = None,
     year_to: int | None = None,
     country: str | None = None,
+    is_active: bool | None = None,
     sort_by: str = "company_name",
     sort_order: str = "ASC",
     page: int = 1,
@@ -326,6 +332,7 @@ def query_companies(
         year_from=year_from,
         year_to=year_to,
         country=country,
+        is_active=is_active,
     )
 
     # Validate sorting
@@ -412,6 +419,7 @@ def export_filtered_csv(
     year_from: int | None = None,
     year_to: int | None = None,
     country: str | None = None,
+    is_active: bool | None = None,
 ) -> int:
     """Export filtered results via DuckDB COPY. Returns row count."""
     db_path = Path(db_path)
@@ -429,6 +437,7 @@ def export_filtered_csv(
         year_from=year_from,
         year_to=year_to,
         country=country,
+        is_active=is_active,
     )
 
     inner_sql = f"SELECT * FROM companies{where_sql} ORDER BY company_name"

@@ -13,13 +13,20 @@ venv/
 env/
 
 # Data files (large downloads, don't commit)
-data/
+data/*
+# ...but track runtime reference data + the example settings template
+!data/reference/
+!data/reference/**
+!data/settings.example.json
 *.zip
 *.csv
+# ...except the runtime reference CSV (force-include overrides *.csv above)
+!data/reference/*.csv
 
 # Database files
 *.duckdb
 *.duckdb.wal
+*.duckdb.bak*
 *.sqlite
 
 # IDE

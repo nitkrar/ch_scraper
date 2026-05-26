@@ -1,0 +1,168 @@
+-- EXAMPLE: ingest Companies House bulk CSVs into companies_staging
+--
+-- This file is NOT run by the Python orchestrator (that lives in
+-- ch_bulk/processor.py, because it needs to glob the data/ directory
+-- and build the file list dynamically). It's kept here as a reference
+-- copy for anyone debugging by hand in the duckdb CLI.
+--
+-- HOW TO USE STANDALONE:
+--   1. Edit the {FILE_LIST} placeholder below — replace with a comma-
+--      separated list of single-quoted absolute paths, e.g.
+--        '/path/to/BasicCompanyData-2026-05-01-part1_7.csv',
+--        '/path/to/BasicCompanyData-2026-05-01-part2_7.csv',
+--        ... etc
+--   2. Run in duckdb:
+--        $ duckdb ch_bulk.duckdb
+--        D DROP TABLE IF EXISTS companies_staging;
+--        D .read sql/ch/_examples/staging_ingest.sql.example
+--
+-- ANY EDITS HERE MUST BE MIRRORED in ch_bulk/processor.py's _ingest_to_staging()
+-- function. The two are intentionally duplicated so the standalone form is
+-- self-contained — but they'll drift if you forget to update both.
+
+DROP TABLE IF EXISTS companies_staging;
+
+CREATE TABLE companies_staging AS
+SELECT
+    "CompanyNumber"                         AS company_number,
+    "CompanyName"                           AS company_name,
+    "CompanyStatus"                         AS company_status,
+    "CompanyCategory"                       AS company_type,
+
+    -- SIC codes: extract numeric prefix + keep full text
+    CASE
+        WHEN "SICCode.SicText_1" IS NOT NULL
+             AND regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1) != ''
+        THEN regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1)
+        ELSE NULL
+    END                                     AS sic_code_1,
+    "SICCode.SicText_1"                     AS sic_text_1,
+
+    CASE
+        WHEN "SICCode.SicText_2" IS NOT NULL
+             AND regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1) != ''
+        THEN regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1)
+        ELSE NULL
+    END                                     AS sic_code_2,
+    "SICCode.SicText_2"                     AS sic_text_2,
+
+    CASE
+        WHEN "SICCode.SicText_3" IS NOT NULL
+             AND regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1) != ''
+        THEN regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1)
+        ELSE NULL
+    END                                     AS sic_code_3,
+    "SICCode.SicText_3"                     AS sic_text_3,
+
+    CASE
+        WHEN "SICCode.SicText_4" IS NOT NULL
+             AND regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1) != ''
+        THEN regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1)
+        ELSE NULL
+    END                                     AS sic_code_4,
+    "SICCode.SicText_4"                     AS sic_text_4,
+
+    -- Address fields (individual + combined)
+    TRIM("RegAddress.CareOf")               AS address_care_of,
+    TRIM("RegAddress.POBox")                AS address_po_box,
+    TRIM("RegAddress.AddressLine1")         AS address_line_1,
+    TRIM("RegAddress.AddressLine2")         AS address_line_2,
+    TRIM("RegAddress.PostTown")             AS address_post_town,
+    TRIM("RegAddress.County")               AS address_county,
+    TRIM("RegAddress.Country")              AS address_country,
+    TRIM("RegAddress.PostCode")             AS postcode,
+
+    CONCAT_WS(', ',
+        NULLIF(TRIM("RegAddress.CareOf"), ''),
+        NULLIF(TRIM("RegAddress.POBox"), ''),
+        NULLIF(TRIM("RegAddress.AddressLine1"), ''),
+        NULLIF(TRIM("RegAddress.AddressLine2"), ''),
+        NULLIF(TRIM("RegAddress.PostTown"), ''),
+        NULLIF(TRIM("RegAddress.County"), ''),
+        NULLIF(TRIM("RegAddress.Country"), '')
+    )                                       AS registered_address,
+
+    -- Dates
+    COALESCE(
+        TRY_CAST(strptime("IncorporationDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("IncorporationDate" AS DATE)
+    )                                       AS incorporation_date,
+    COALESCE(
+        TRY_CAST(strptime("DissolutionDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("DissolutionDate" AS DATE)
+    )                                       AS dissolution_date,
+
+    "CountryOfOrigin"                       AS country_of_origin,
+
+    -- Accounts
+    TRY_CAST("Accounts.AccountRefDay" AS INTEGER)   AS accounts_ref_day,
+    TRY_CAST("Accounts.AccountRefMonth" AS INTEGER) AS accounts_ref_month,
+    COALESCE(
+        TRY_CAST(strptime("Accounts.NextDueDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("Accounts.NextDueDate" AS DATE)
+    )                                       AS accounts_next_due,
+    COALESCE(
+        TRY_CAST(strptime("Accounts.LastMadeUpDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("Accounts.LastMadeUpDate" AS DATE)
+    )                                       AS accounts_last_made_up,
+    "Accounts.AccountCategory"              AS accounts_category,
+
+    -- Returns / Confirmation Statement
+    COALESCE(
+        TRY_CAST(strptime("Returns.NextDueDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("Returns.NextDueDate" AS DATE)
+    )                                       AS returns_next_due,
+    COALESCE(
+        TRY_CAST(strptime("Returns.LastMadeUpDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("Returns.LastMadeUpDate" AS DATE)
+    )                                       AS returns_last_made_up,
+    COALESCE(
+        TRY_CAST(strptime("ConfStmtNextDueDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("ConfStmtNextDueDate" AS DATE)
+    )                                       AS conf_stmt_next_due,
+    COALESCE(
+        TRY_CAST(strptime("ConfStmtLastMadeUpDate", '%d/%m/%Y') AS DATE),
+        TRY_CAST("ConfStmtLastMadeUpDate" AS DATE)
+    )                                       AS conf_stmt_last_made_up,
+
+    -- Mortgages / Charges
+    TRY_CAST("Mortgages.NumMortCharges" AS INTEGER)        AS num_mort_charges,
+    TRY_CAST("Mortgages.NumMortOutstanding" AS INTEGER)    AS num_mort_outstanding,
+    TRY_CAST("Mortgages.NumMortPartSatisfied" AS INTEGER)  AS num_mort_part_satisfied,
+    TRY_CAST("Mortgages.NumMortSatisfied" AS INTEGER)      AS num_mort_satisfied,
+
+    -- Limited Partnerships
+    TRY_CAST("LimitedPartnerships.NumGenPartners" AS INTEGER)  AS num_gen_partners,
+    TRY_CAST("LimitedPartnerships.NumLimPartners" AS INTEGER)  AS num_lim_partners,
+
+    -- URI
+    "URI"                                   AS uri,
+
+    -- Previous names (up to 10)
+    "PreviousName_1.CONDATE"                AS prev_name_1_date,
+    "PreviousName_1.CompanyName"            AS prev_name_1,
+    "PreviousName_2.CONDATE"                AS prev_name_2_date,
+    "PreviousName_2.CompanyName"            AS prev_name_2,
+    "PreviousName_3.CONDATE"                AS prev_name_3_date,
+    "PreviousName_3.CompanyName"            AS prev_name_3,
+    "PreviousName_4.CONDATE"                AS prev_name_4_date,
+    "PreviousName_4.CompanyName"            AS prev_name_4,
+    "PreviousName_5.CONDATE"                AS prev_name_5_date,
+    "PreviousName_5.CompanyName"            AS prev_name_5,
+    "PreviousName_6.CONDATE"                AS prev_name_6_date,
+    "PreviousName_6.CompanyName"            AS prev_name_6,
+    "PreviousName_7.CONDATE"                AS prev_name_7_date,
+    "PreviousName_7.CompanyName"            AS prev_name_7,
+    "PreviousName_8.CONDATE"                AS prev_name_8_date,
+    "PreviousName_8.CompanyName"            AS prev_name_8,
+    "PreviousName_9.CONDATE"                AS prev_name_9_date,
+    "PreviousName_9.CompanyName"            AS prev_name_9,
+    "PreviousName_10.CONDATE"               AS prev_name_10_date,
+    "PreviousName_10.CompanyName"            AS prev_name_10
+
+FROM read_csv_auto(
+    [{FILE_LIST}],
+    header = true,
+    ignore_errors = true,
+    all_varchar = true
+);

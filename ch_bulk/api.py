@@ -4,19 +4,72 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
 import duckdb
 
+from ch_bulk._logging import setup_logging
+from ch_bulk.bootstrap import ensure_pipeline_schema
+from ch_bulk.ch_enricher import enrich_directors as _enrich_directors
+from ch_bulk.ch_enricher import load_director_staging as _load_director_staging
+from ch_bulk.classifier import WebsiteClassifier, load_classification_staging as _load_classification_staging
+from ch_bulk.ch_enricher import enrich_revenue as _enrich_revenue
+from ch_bulk.financials_enricher import enrich_financials as _enrich_financials
+from ch_bulk.financials_enricher import load_financials_staging as _load_financials_staging
+from ch_bulk.cqc_downloader import download_cqc_directory, download_hsca_filters
+from ch_bulk.cqc_api_enricher import CQCAPIEnricher, load_cqc_staging as _load_cqc_staging
+from ch_bulk.cqc_processor import process_cqc_csv, process_hsca_filters
+from ch_bulk.cqc_query import (
+    export_cqc_locations_csv as _export_cqc_locations_csv,
+    export_cqc_providers_csv as _export_cqc_providers_csv,
+    get_cqc_filter_options as _get_cqc_filter_options,
+    query_cqc_locations,
+    query_cqc_providers,
+)
 from ch_bulk.downloader import download_bulk_data
-from ch_bulk.processor import process_csvs
+from ch_bulk.matcher import match_companies_to_cqc
+from ch_bulk.migration import export_to_parquet as _export_to_parquet
+from ch_bulk.migration import import_from_parquet as _import_from_parquet
+from ch_bulk.processor import (
+    SanityCheckError,
+    SanityCheckResult,
+    compact_database,
+    process_csvs,
+)
 from ch_bulk.query import export_query_csv, get_db_info, query_by_sic
 from ch_bulk.query import export_filtered_csv as _export_filtered_csv
 from ch_bulk.query import get_filter_options as _get_filter_options
 from ch_bulk.query import query_companies
+from ch_bulk.website_finder import (
+    WebsiteFinder,
+    load_website_finder_staging as _load_website_finder_staging,
+)
 
 logger = logging.getLogger(__name__)
+
+# CH bulk filenames look like:
+#   BasicCompanyData-2026-05-01-part3_7.csv
+# Group by the YYYY-MM-DD chunk so multi-month folders process in order.
+_MONTH_RE = re.compile(r"BasicCompanyData-(\d{4}-\d{2}-\d{2})-part\d+_\d+\.csv$")
+
+
+def _group_by_month(csv_files: list[Path]) -> dict[str, list[Path]]:
+    """Group CH bulk CSV files by their YYYY-MM-DD prefix.
+
+    Files whose names don't match the expected pattern are bucketed
+    under ``"unknown"`` — they'll still be processed, but as a single
+    chunk after all dated months.
+    """
+    groups: dict[str, list[Path]] = {}
+    for f in csv_files:
+        m = _MONTH_RE.match(f.name)
+        key = m.group(1) if m else "unknown"
+        groups.setdefault(key, []).append(f)
+    for v in groups.values():
+        v.sort()
+    return groups
 
 
 class ChBulk:
@@ -25,23 +78,36 @@ class ChBulk:
 
     Example::
 
-        ch = ChBulk(data_dir="./data", db_path="ch_bulk.duckdb")
+        ch = ChBulk(data_dir="./data", db_path="data/db/ch_bulk.duckdb")
         ch.download()
         ch.process()
         companies = ch.query("62012")
 
     Args:
-        data_dir: Directory to store downloaded/extracted files.
+        data_dir: Directory to store downloaded/extracted files. CH bulk
+            files land in ``<data_dir>/input/ch/``; CQC files (when added)
+            will land in ``<data_dir>/input/cqc/``.
         db_path: Path to the DuckDB database file.
     """
 
     def __init__(
         self,
         data_dir: str | Path = "./data",
-        db_path: str | Path = "ch_bulk.duckdb",
+        db_path: str | Path = "data/db/ch_bulk.duckdb",
     ) -> None:
         self.data_dir = Path(data_dir)
         self.db_path = Path(db_path)
+        setup_logging(self.data_dir)
+
+    @property
+    def ch_dir(self) -> Path:
+        """Where CH BasicCompanyData CSVs live."""
+        return self.data_dir / "input" / "ch"
+
+    @property
+    def cqc_dir(self) -> Path:
+        """Where CQC bulk files will live (when CQC support lands)."""
+        return self.data_dir / "input" / "cqc"
 
     def download(
         self,
@@ -71,29 +137,382 @@ class ChBulk:
         self,
         csv_files: list[Path] | None = None,
         progress_callback: callable | None = None,
+        compact: bool = True,
+        force: bool = False,
     ) -> int:
-        """Ingest downloaded CSV files into DuckDB.
+        """Ingest downloaded CSV files into DuckDB via upsert.
+
+        First call (no ``companies`` table): bootstraps the table from
+        the oldest month present, then upserts each newer month in
+        order. Subsequent calls: merges via the upsert pipeline, with
+        two sanity checks gating the merge — row-count delta and
+        inactive-churn delta, both at 5% thresholds.
 
         Args:
             csv_files: Specific CSV files to ingest. If ``None``,
-                auto-discovers all ``BasicCompanyData*.csv`` files
-                in :attr:`data_dir`.
+                auto-discovers all ``BasicCompanyData*.csv`` files in
+                ``<data_dir>/input/ch/``. When multiple months are
+                present, processes the oldest first then upserts the
+                rest in chronological order.
             progress_callback: If provided, called with status strings
                 instead of printing to the terminal.
+            compact: If ``True`` (default), reclaim disk space after
+                ingest by rebuilding the database file. DuckDB does
+                not reclaim pages after table changes automatically.
+            force: If ``True``, skip the sanity-check guard. Use only
+                when you've verified the input is correct (e.g., genuine
+                large attrition month, or a deliberate schema change).
 
         Returns:
-            Total number of rows ingested.
+            Total number of rows in ``companies`` after all months are
+            processed.
 
         Raises:
             FileNotFoundError: If no CSV files are found.
+            ch_bulk.processor.SanityCheckError: If a sanity check fails
+                and ``force=False``. Inspect ``.result`` for the numbers.
         """
         if csv_files is None:
-            csv_files = sorted(self.data_dir.glob("BasicCompanyData*.csv"))
+            csv_files = sorted(self.ch_dir.glob("BasicCompanyData*.csv"))
+        else:
+            csv_files = [Path(f) for f in csv_files]
         if not csv_files:
             raise FileNotFoundError(
-                f"No BasicCompanyData CSV files found in {self.data_dir}"
+                f"No BasicCompanyData CSV files found in {self.ch_dir}"
             )
-        return process_csvs(csv_files, self.db_path, progress_callback=progress_callback)
+
+        # Group by month so multiple months get processed in order
+        # (oldest bootstraps, newer ones upsert). For a single-month
+        # call this is just one group.
+        months = _group_by_month(csv_files)
+        row_count = 0
+        for month_key in sorted(months.keys()):
+            month_files = months[month_key]
+            if progress_callback:
+                progress_callback(
+                    f"Processing month {month_key} "
+                    f"({len(month_files)} files)..."
+                )
+            # Defer compaction until after all months — no point
+            # compacting between back-to-back upserts.
+            row_count = process_csvs(
+                month_files,
+                self.db_path,
+                progress_callback=progress_callback,
+                force=force,
+                compact=False,
+            )
+        if compact:
+            compact_database(self.db_path, progress_callback=progress_callback)
+        return row_count
+
+    def compact(self, progress_callback: callable | None = None) -> None:
+        """Rebuild the database file to reclaim disk space.
+
+        Use this after manually editing the database (e.g., dropping
+        a table via raw DuckDB) when you want to shrink the file on
+        disk. ``process()`` calls this automatically by default.
+
+        Args:
+            progress_callback: If provided, called with status strings.
+
+        Raises:
+            FileNotFoundError: If the database does not exist.
+        """
+        compact_database(self.db_path, progress_callback=progress_callback)
+
+    def bootstrap(self) -> None:
+        """Create the extended homecare pipeline schema objects.
+
+        Safe to re-run. If the CH ``companies`` table does not exist yet,
+        the table bootstrap still succeeds and the derived views are
+        deferred until a later call.
+        """
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        con = duckdb.connect(str(self.db_path))
+        try:
+            ensure_pipeline_schema(con)
+        finally:
+            con.close()
+
+    # ── CQC pipeline ─────────────────────────────────────────────────
+
+    def download_cqc(
+        self,
+        progress_callback: callable | None = None,
+    ) -> Path:
+        """Download the latest CQC care directory CSV.
+
+        Saved to ``<data_dir>/input/cqc/cqc_directory_YYYY-MM-DD.csv``.
+        Idempotent: if a file for the latest published date is already
+        on disk, the download is skipped.
+
+        Returns:
+            Path to the downloaded (or already-present) CSV.
+        """
+        return download_cqc_directory(
+            self.data_dir, progress_callback=progress_callback
+        )
+
+    def process_cqc(
+        self,
+        csv_file: Path | None = None,
+        progress_callback: callable | None = None,
+        compact: bool = True,
+        force: bool = False,
+    ) -> int:
+        """Ingest CQC directory CSV into the DuckDB database.
+
+        Auto-discovers the latest CSV in ``<data_dir>/input/cqc/`` if
+        ``csv_file`` is not supplied.
+
+        Returns:
+            Total rows in ``cqc_locations`` after the operation.
+
+        Raises:
+            FileNotFoundError: If no CQC CSV is found.
+            ch_bulk.processor.SanityCheckError: On sanity failure.
+        """
+        if csv_file is None:
+            candidates = sorted(self.cqc_dir.glob("cqc_directory_*.csv"))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No cqc_directory_*.csv files found in {self.cqc_dir}"
+                )
+            csv_file = candidates[-1]
+        return process_cqc_csv(
+            csv_file,
+            self.db_path,
+            progress_callback=progress_callback,
+            force=force,
+            compact=compact,
+        )
+
+    def sync_cqc(
+        self,
+        force: bool = False,
+        progress_callback: callable | None = None,
+    ) -> int:
+        """Download + process the latest CQC directory in one step."""
+        csv_file = self.download_cqc(progress_callback=progress_callback)
+        return self.process_cqc(
+            csv_file=csv_file,
+            progress_callback=progress_callback,
+            force=force,
+        )
+
+    def download_hsca(
+        self,
+        target_date=None,
+        progress_callback: callable | None = None,
+    ) -> Path:
+        """Download the latest HSCA active locations ODS."""
+        return download_hsca_filters(
+            self.data_dir,
+            target_date=target_date,
+            progress_callback=progress_callback,
+        )
+
+    def process_hsca(
+        self,
+        ods_file: Path | None = None,
+        progress_callback: callable | None = None,
+        compact: bool = True,
+        force: bool = False,
+    ) -> int:
+        """Ingest the latest HSCA ODS into the DuckDB database."""
+        if ods_file is None:
+            candidates = sorted(self.cqc_dir.glob("hsca_active_locations_*.ods"))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No hsca_active_locations_*.ods files found in {self.cqc_dir}"
+                )
+            ods_file = candidates[-1]
+        return process_hsca_filters(
+            ods_file,
+            self.db_path,
+            progress_callback=progress_callback,
+            force=force,
+            compact=compact,
+        )
+
+    def cqc_hsca_sync(
+        self,
+        force: bool = False,
+        target_date=None,
+        progress_callback: callable | None = None,
+    ) -> int:
+        """Download + process the latest HSCA ODS in one step."""
+        ods_file = self.download_hsca(
+            target_date=target_date,
+            progress_callback=progress_callback,
+        )
+        return self.process_hsca(
+            ods_file=ods_file,
+            progress_callback=progress_callback,
+            force=force,
+        )
+
+    def cqc_enrich_providers(
+        self,
+        *,
+        mode: str = "incremental",
+        ids: list[str] | None = None,
+        batch_size: int = 1000,
+    ) -> dict[str, object]:
+        enricher = CQCAPIEnricher(self.data_dir, self.db_path)
+        return enricher.enrich_providers(mode=mode, ids=ids, batch_size=batch_size)
+
+    def cqc_enrich_locations(
+        self,
+        *,
+        mode: str = "incremental",
+        ids: list[str] | None = None,
+        batch_size: int = 1000,
+    ) -> dict[str, object]:
+        enricher = CQCAPIEnricher(self.data_dir, self.db_path)
+        return enricher.enrich_locations(mode=mode, ids=ids, batch_size=batch_size)
+
+    def ch_enrich_directors(
+        self,
+        *,
+        sic: str = "88100",
+        company_numbers: list[str] | None = None,
+        force: bool = False,
+        batch_size: int = 1000,
+    ) -> dict[str, int | str]:
+        return _enrich_directors(
+            self.db_path,
+            self.data_dir,
+            sic=sic,
+            company_numbers=company_numbers,
+            force=force,
+            batch_size=batch_size,
+        )
+
+    def ch_enrich_revenue(
+        self,
+        *,
+        sic: str = "88100",
+        company_numbers: list[str] | None = None,
+    ) -> dict[str, int]:
+        return _enrich_revenue(
+            self.db_path,
+            self.data_dir,
+            sic=sic,
+            company_numbers=company_numbers,
+        )
+
+    def enrich_financials(
+        self,
+        *,
+        mode: str = "incremental",
+        ids: list[str] | None = None,
+        workers: int = 3,
+        parser_workers: int = 4,
+        batch_size: int = 100,
+    ) -> dict[str, object]:
+        return _enrich_financials(
+            self.db_path,
+            self.data_dir,
+            mode=mode,
+            ids=ids,
+            workers=workers,
+            parser_workers=parser_workers,
+            batch_size=batch_size,
+        )
+
+    def classify(
+        self,
+        *,
+        mode: str = "incremental",
+        ids: list[str] | None = None,
+        batch_size: int = 100,
+    ) -> dict[str, object]:
+        with WebsiteClassifier(self.data_dir, self.db_path) as classifier:
+            return classifier.classify(mode=mode, ids=ids, batch_size=batch_size)
+
+    def find_websites(
+        self,
+        *,
+        mode: str = "incremental",
+        ids: list[str] | None = None,
+        pause_seconds: float = 0.7,
+    ) -> dict[str, object]:
+        with WebsiteFinder(self.data_dir, self.db_path) as finder:
+            return finder.find(
+                mode=mode,
+                ids=ids,
+                pause_seconds=pause_seconds,
+            )
+
+    def migration_export(
+        self,
+        *,
+        bundle_dir: str | Path,
+    ) -> dict[str, object]:
+        return _export_to_parquet(self.db_path, bundle_dir)
+
+    def migration_import(
+        self,
+        *,
+        bundle_dir: str | Path,
+        force: bool = False,
+    ) -> dict[str, object]:
+        return _import_from_parquet(
+            bundle_dir,
+            self.db_path,
+            force=force,
+        )
+
+    def load_staging(
+        self,
+        *,
+        sync_type: str,
+        batch_id: str | None = None,
+    ) -> dict[str, object]:
+        if sync_type in {"api_providers", "api_locations"}:
+            return _load_cqc_staging(
+                self.data_dir,
+                self.db_path,
+                sync_type=sync_type,
+                batch_id=batch_id,
+            )
+        if sync_type == "classifications":
+            return _load_classification_staging(
+                self.data_dir,
+                self.db_path,
+                batch_id=batch_id,
+            )
+        if sync_type == "website_finder":
+            return _load_website_finder_staging(
+                self.data_dir,
+                self.db_path,
+                batch_id=batch_id,
+            )
+        if sync_type == "ch_directors":
+            return _load_director_staging(
+                self.data_dir,
+                self.db_path,
+                batch_id=batch_id,
+            )
+        if sync_type == "financials":
+            return _load_financials_staging(
+                self.data_dir,
+                self.db_path,
+                batch_id=batch_id,
+            )
+        raise ValueError(f"Unsupported sync_type for load-staging: {sync_type}")
+
+    def match(
+        self,
+        *,
+        mode: str = "incremental",
+    ) -> dict[str, int | str]:
+        return match_companies_to_cqc(
+            self.db_path,
+            mode=mode,
+        )
 
     def query(
         self,
@@ -132,6 +551,7 @@ class ChBulk:
         self,
         month: str | None = None,
         keep_zips: bool = False,
+        force: bool = False,
     ) -> int:
         """Download and process in one step.
 
@@ -141,12 +561,13 @@ class ChBulk:
         Args:
             month: Month in ``YYYY-MM`` format, or ``None`` to auto-detect.
             keep_zips: If ``True``, keep ZIP files after extraction.
+            force: If ``True``, skip the upsert sanity-check guard.
 
         Returns:
             Total number of rows ingested.
         """
         csv_files = self.download(month=month, keep_zips=keep_zips)
-        return self.process(csv_files=csv_files)
+        return self.process(csv_files=csv_files, force=force)
 
     def export_sqlite(self, output_path: str | Path) -> Path:
         """Export the DuckDB database to a SQLite file.
@@ -219,6 +640,26 @@ class ChBulk:
     def get_filter_options(self) -> dict:
         """Returns distinct values for filter dropdowns."""
         return _get_filter_options(self.db_path)
+
+    def query_cqc_locations_advanced(self, **filters) -> tuple[list[dict], int]:
+        """Multi-filter paginated query against cqc_locations."""
+        return query_cqc_locations(self.db_path, **filters)
+
+    def query_cqc_providers_advanced(self, **filters) -> tuple[list[dict], int]:
+        """Multi-filter paginated query against cqc_providers."""
+        return query_cqc_providers(self.db_path, **filters)
+
+    def get_cqc_filter_options(self) -> dict:
+        """Distinct values for CQC filter dropdowns."""
+        return _get_cqc_filter_options(self.db_path)
+
+    def export_cqc_locations_csv(self, output_path, **filters) -> int:
+        """Export filtered cqc_locations to CSV. Returns row count."""
+        return _export_cqc_locations_csv(self.db_path, output_path, **filters)
+
+    def export_cqc_providers_csv(self, output_path, **filters) -> int:
+        """Export filtered cqc_providers to CSV. Returns row count."""
+        return _export_cqc_providers_csv(self.db_path, output_path, **filters)
 
     def export_filtered_csv(self, output_path, **filters) -> int:
         """Export filtered results to CSV via DuckDB COPY. Returns row count."""
