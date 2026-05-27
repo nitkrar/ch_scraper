@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.sync_batches import insert_sync_batch
-from ch_bulk.web_search import DuckDuckGoSearcher, URLCheckResult
-from ch_bulk.website_finder import (
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.sync_batches import insert_sync_batch
+from ch_bulk.web.search import DuckDuckGoSearcher, URLCheckResult
+from ch_bulk.web.website_finder import (
     StagedWebsiteSearch,
     load_website_finder_staging,
 )
@@ -57,7 +57,7 @@ class DuckDuckGoSearchTests(unittest.TestCase):
             return_value=DummyResponse(200, html),
         ):
             with patch(
-                "ch_bulk.web_search._check_results_in_parallel",
+                "ch_bulk.web.search._check_results_in_parallel",
                 return_value={
                     1: URLCheckResult(
                         reachable=True,
@@ -119,7 +119,7 @@ class DuckDuckGoSearchTests(unittest.TestCase):
             return_value=DummyResponse(200, html),
         ):
             with patch(
-                "ch_bulk.web_search._check_results_in_parallel",
+                "ch_bulk.web.search._check_results_in_parallel",
                 return_value={
                     1: URLCheckResult(
                         reachable=True,

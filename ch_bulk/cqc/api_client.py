@@ -10,8 +10,9 @@ from pathlib import Path
 
 import httpx
 
-from ch_bulk.rate_limit import SlidingWindowThrottle
-from ch_bulk.settings import load_settings
+from ch_bulk.core.paths import DEFAULT_DATA_DIR
+from ch_bulk.core.rate_limit import SlidingWindowThrottle
+from ch_bulk.core.settings import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +32,13 @@ class CQCAPIClient:
 
     def __init__(
         self,
-        data_dir: str | Path = "./data",
+        data_dir: str | Path | None = None,
         *,
         api_key: str | None = None,
     ) -> None:
+        data_dir_path = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
         if api_key is None:
-            api_key = load_settings(data_dir)["api_keys"]["cqc"]
+            api_key = load_settings(data_dir_path)["api_keys"]["cqc"]
         if not api_key:
             raise RuntimeError("CQC API key is not configured in settings.json")
 

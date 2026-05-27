@@ -11,10 +11,11 @@ from typing import Literal
 
 import duckdb
 
-from ch_bulk._logging import FsyncLineLogger
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.cqc_api_client import APIResult, CQCAPIClient
-from ch_bulk.staging import (
+from ch_bulk.core.logging import FsyncLineLogger
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.cqc.api_client import APIResult, CQCAPIClient
+from ch_bulk.db.staging import (
     LoadedBatch,
     RAW_API_RESPONSE_INSERT_SQL,
     STAGED_JSONL_SCAN_SQL,
@@ -29,7 +30,7 @@ from ch_bulk.staging import (
     sync_batch_progress,
     with_duckdb_connection,
 )
-from ch_bulk.sync_batches import (
+from ch_bulk.db.sync_batches import (
     finish_sync_batch,
     insert_sync_batch,
     update_sync_batch_progress,
@@ -763,11 +764,11 @@ def _duration_text(seconds: float) -> str:
 class CQCAPIEnricher:
     def __init__(
         self,
-        data_dir: str | Path = "./data",
-        db_path: str | Path = "data/db/ch_bulk.duckdb",
+        data_dir: str | Path | None = None,
+        db_path: str | Path | None = None,
     ) -> None:
-        self.data_dir = Path(data_dir)
-        self.db_path = Path(db_path)
+        self.data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+        self.db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
 
     def enrich_providers(
         self,

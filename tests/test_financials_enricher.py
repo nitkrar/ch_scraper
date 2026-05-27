@@ -18,9 +18,9 @@ import duckdb
 import requests
 from typer.testing import CliRunner
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.cli import app as cli_app
-from ch_bulk.financials_enricher import (
+from ch_bulk.companies_house.financials_enricher import (
     IXBRL_RESOURCE,
     PDF_RESOURCE,
     CompaniesHouseFinancialsClient,
@@ -38,8 +38,8 @@ from ch_bulk.financials_enricher import (
     enrich_financials,
     load_financials_staging,
 )
-from ch_bulk.staging import StagingWriter
-from ch_bulk.sync_batches import insert_sync_batch
+from ch_bulk.db.staging import StagingWriter
+from ch_bulk.db.sync_batches import insert_sync_batch
 
 CLI_RUNNER = CliRunner()
 
@@ -248,7 +248,7 @@ class FinancialParserTests(unittest.TestCase):
         ]
 
         with patch(
-            "ch_bulk.financials_enricher.IXBRL",
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
             return_value=_FakeIXBRLDocument(rows),
         ):
             facts = _parse_ixbrl_bytes(b"<html></html>")
@@ -294,7 +294,7 @@ class FinancialParserTests(unittest.TestCase):
         ]
 
         with patch(
-            "ch_bulk.financials_enricher.IXBRL",
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
             return_value=_FakeIXBRLDocument(rows),
         ):
             facts = _parse_ixbrl_bytes(b"<html></html>")
@@ -335,7 +335,7 @@ class FinancialParserTests(unittest.TestCase):
         ]
 
         with patch(
-            "ch_bulk.financials_enricher.IXBRL",
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
             return_value=_FakeIXBRLDocument(rows),
         ):
             facts = _parse_ixbrl_bytes(b"<html></html>")
@@ -364,7 +364,7 @@ class FinancialParserTests(unittest.TestCase):
         ]
 
         with patch(
-            "ch_bulk.financials_enricher.IXBRL",
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
             return_value=_FakeIXBRLDocument(rows),
         ):
             facts = _parse_ixbrl_bytes(
@@ -431,7 +431,7 @@ class FinancialParserTests(unittest.TestCase):
         ]
 
         with patch(
-            "ch_bulk.financials_enricher.IXBRL",
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
             return_value=_FakeIXBRLDocument(rows),
         ):
             facts = _parse_ixbrl_bytes(b"<html></html>")
@@ -457,7 +457,7 @@ class FinancialParserTests(unittest.TestCase):
             ]
         )
 
-        with patch("ch_bulk.financials_enricher.pdfplumber.open", return_value=fake_pdf):
+        with patch("ch_bulk.companies_house.financials_enricher.pdfplumber.open", return_value=fake_pdf):
             facts = _parse_pdf_bytes(b"%PDF-1.4 fixture")
 
         self.assertEqual(facts.parse_status, "pdf_parse_partial")
@@ -481,7 +481,7 @@ class FinancialParserTests(unittest.TestCase):
     def test_parse_pdf_bytes_marks_sparse_scans_as_no_text_layer(self):
         fake_pdf = _FakePDFDocument(["", "", ""])
 
-        with patch("ch_bulk.financials_enricher.pdfplumber.open", return_value=fake_pdf):
+        with patch("ch_bulk.companies_house.financials_enricher.pdfplumber.open", return_value=fake_pdf):
             facts = _parse_pdf_bytes(b"%PDF-1.4 fixture")
 
         self.assertEqual(facts.parse_status, "pdf_no_text_layer")
@@ -552,7 +552,7 @@ class FinancialParserTests(unittest.TestCase):
                     success_response,
                 ],
             ) as public_get,
-            patch("ch_bulk.financials_enricher.time.sleep"),
+            patch("ch_bulk.companies_house.financials_enricher.time.sleep"),
         ):
             content = client.download_document(
                 document_url="https://document-api.company-information.service.gov.uk/document/id/content",
@@ -626,10 +626,10 @@ class FinancialProcessTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch(
-                "ch_bulk.financials_enricher._parse_ixbrl_bytes",
+                "ch_bulk.companies_house.financials_enricher._parse_ixbrl_bytes",
                 return_value=parsed_facts,
             ) as parse_ixbrl,
-            patch("ch_bulk.financials_enricher._parse_pdf_bytes") as parse_pdf,
+            patch("ch_bulk.companies_house.financials_enricher._parse_pdf_bytes") as parse_pdf,
         ):
             result = _process_company(
                 client,
@@ -677,8 +677,8 @@ class FinancialProcessTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            patch("ch_bulk.financials_enricher._parse_ixbrl_bytes") as parse_ixbrl,
-            patch("ch_bulk.financials_enricher._parse_pdf_bytes") as parse_pdf,
+            patch("ch_bulk.companies_house.financials_enricher._parse_ixbrl_bytes") as parse_ixbrl,
+            patch("ch_bulk.companies_house.financials_enricher._parse_pdf_bytes") as parse_pdf,
         ):
             result = _process_company(
                 client,
@@ -729,8 +729,8 @@ class FinancialProcessTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            patch("ch_bulk.financials_enricher._parse_ixbrl_bytes") as parse_ixbrl,
-            patch("ch_bulk.financials_enricher._parse_pdf_bytes") as parse_pdf,
+            patch("ch_bulk.companies_house.financials_enricher._parse_ixbrl_bytes") as parse_ixbrl,
+            patch("ch_bulk.companies_house.financials_enricher._parse_pdf_bytes") as parse_pdf,
         ):
             result = _process_company(
                 client,
@@ -1257,7 +1257,7 @@ class FinancialStagingTests(unittest.TestCase):
             )
 
             with patch(
-                "ch_bulk.financials_enricher._parse_ixbrl_bytes",
+                "ch_bulk.companies_house.financials_enricher._parse_ixbrl_bytes",
                 return_value=parsed_facts,
             ) as parse_ixbrl:
                 appended = _replay_financials_fetch_staging_file(
@@ -1381,19 +1381,19 @@ class FinancialStagingTests(unittest.TestCase):
 
         with (
             patch(
-                "ch_bulk.financials_enricher.load_settings",
+                "ch_bulk.companies_house.financials_enricher.load_settings",
                 return_value={"api_keys": {"companies_house": "fixture-key"}},
             ),
             patch(
-                "ch_bulk.financials_enricher.CompaniesHouseFinancialsClient",
+                "ch_bulk.companies_house.financials_enricher.CompaniesHouseFinancialsClient",
                 return_value=fake_client,
             ),
             patch(
-                "ch_bulk.financials_enricher._fetch_company_work_item",
+                "ch_bulk.companies_house.financials_enricher._fetch_company_work_item",
                 side_effect=fake_fetch,
             ),
             patch(
-                "ch_bulk.financials_enricher.PIPELINE_HEARTBEAT_INTERVAL_SECONDS",
+                "ch_bulk.companies_house.financials_enricher.PIPELINE_HEARTBEAT_INTERVAL_SECONDS",
                 0.0,
             ),
         ):
@@ -1524,23 +1524,23 @@ class FinancialStagingTests(unittest.TestCase):
 
         with (
             patch(
-                "ch_bulk.financials_enricher.load_settings",
+                "ch_bulk.companies_house.financials_enricher.load_settings",
                 return_value={"api_keys": {"companies_house": "fixture-key"}},
             ),
             patch(
-                "ch_bulk.financials_enricher.CompaniesHouseFinancialsClient",
+                "ch_bulk.companies_house.financials_enricher.CompaniesHouseFinancialsClient",
                 return_value=fake_client,
             ),
             patch(
-                "ch_bulk.financials_enricher._fetch_company_work_item",
+                "ch_bulk.companies_house.financials_enricher._fetch_company_work_item",
                 side_effect=fake_fetch,
             ),
             patch(
-                "ch_bulk.financials_enricher.PIPELINE_HEARTBEAT_INTERVAL_SECONDS",
+                "ch_bulk.companies_house.financials_enricher.PIPELINE_HEARTBEAT_INTERVAL_SECONDS",
                 0.0,
             ),
             patch(
-                "ch_bulk.financials_enricher.queue.Queue",
+                "ch_bulk.companies_house.financials_enricher.queue.Queue",
                 side_effect=recording_queue,
             ),
         ):
@@ -1721,7 +1721,7 @@ class FinancialStagingTests(unittest.TestCase):
             )
 
             with patch(
-                "ch_bulk.financials_enricher._parse_ixbrl_bytes",
+                "ch_bulk.companies_house.financials_enricher._parse_ixbrl_bytes",
                 return_value=parsed_facts,
             ):
                 appended = _replay_financials_fetch_staging_file(
@@ -1878,15 +1878,15 @@ class FinancialStagingTests(unittest.TestCase):
 
         with (
             patch(
-                "ch_bulk.financials_enricher.load_settings",
+                "ch_bulk.companies_house.financials_enricher.load_settings",
                 return_value={"api_keys": {"companies_house": "fixture-key"}},
             ),
             patch(
-                "ch_bulk.financials_enricher.CompaniesHouseFinancialsClient",
+                "ch_bulk.companies_house.financials_enricher.CompaniesHouseFinancialsClient",
                 return_value=fake_client,
             ),
             patch(
-                "ch_bulk.financials_enricher._fetch_company_work_item",
+                "ch_bulk.companies_house.financials_enricher._fetch_company_work_item",
                 side_effect=fake_fetch,
             ),
             patch.object(
@@ -2000,15 +2000,15 @@ class FinancialStagingTests(unittest.TestCase):
         try:
             with (
                 patch(
-                    "ch_bulk.financials_enricher.load_settings",
+                    "ch_bulk.companies_house.financials_enricher.load_settings",
                     return_value={"api_keys": {"companies_house": "fixture-key"}},
                 ),
                 patch(
-                    "ch_bulk.financials_enricher.CompaniesHouseFinancialsClient",
+                    "ch_bulk.companies_house.financials_enricher.CompaniesHouseFinancialsClient",
                     return_value=fake_client,
                 ),
                 patch(
-                    "ch_bulk.financials_enricher._fetch_company_work_item",
+                    "ch_bulk.companies_house.financials_enricher._fetch_company_work_item",
                     side_effect=fake_fetch,
                 ),
             ):

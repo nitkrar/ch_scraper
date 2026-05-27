@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.processor import compact_database
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.companies_house.processor import compact_database
 
 
 def _foreign_key_refs(

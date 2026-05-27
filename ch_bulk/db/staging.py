@@ -13,8 +13,8 @@ from typing import Any, Callable, TypeVar
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.sync_batches import finish_sync_batch, update_sync_batch_progress
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.sync_batches import finish_sync_batch, update_sync_batch_progress
 
 DB_LOCK_RETRY_ATTEMPTS = 120
 DB_LOCK_RETRY_DELAY_SECONDS = 0.25

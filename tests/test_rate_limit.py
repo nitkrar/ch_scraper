@@ -4,7 +4,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from ch_bulk.rate_limit import SlidingWindowThrottle
+from ch_bulk.core.rate_limit import SlidingWindowThrottle
 
 
 class _FakeClock:
@@ -54,8 +54,8 @@ class SlidingWindowThrottleTests(unittest.TestCase):
                 errors.append(exc)
 
         with (
-            patch("ch_bulk.rate_limit.time.monotonic", side_effect=clock.monotonic),
-            patch("ch_bulk.rate_limit.time.sleep", side_effect=fake_sleep),
+            patch("ch_bulk.core.rate_limit.time.monotonic", side_effect=clock.monotonic),
+            patch("ch_bulk.core.rate_limit.time.sleep", side_effect=fake_sleep),
         ):
             throttle.wait()  # consume the single available slot at t=0
 

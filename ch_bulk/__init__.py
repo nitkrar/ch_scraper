@@ -1,6 +1,6 @@
 """ch_bulk — Download and query UK Companies House bulk data by SIC code."""
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
 
 __all__ = [
     "ChBulk",
@@ -16,7 +16,7 @@ def __getattr__(name: str):
 
         return ChBulk
     if name in {"SanityCheckError", "SanityCheckResult"}:
-        from ch_bulk.processor import SanityCheckError, SanityCheckResult
+        from ch_bulk.companies_house.processor import SanityCheckError, SanityCheckResult
 
         return {
             "SanityCheckError": SanityCheckError,

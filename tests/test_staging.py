@@ -14,11 +14,11 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk._logging import FsyncLineLogger
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.cqc_api_enricher import load_cqc_staging
-from ch_bulk.staging import StagedAPIResponse, StagingWriter
-from ch_bulk.sync_batches import insert_sync_batch
+from ch_bulk.core.logging import FsyncLineLogger
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.cqc.api_enricher import load_cqc_staging
+from ch_bulk.db.staging import StagedAPIResponse, StagingWriter
+from ch_bulk.db.sync_batches import insert_sync_batch
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,7 +35,7 @@ class FsyncLineLoggerTests(unittest.TestCase):
                     buffering_values.append(kwargs.get("buffering"))
                 return real_open(*args, **kwargs)
 
-            with patch("ch_bulk._logging.open", side_effect=tracking_open):
+            with patch("ch_bulk.core.logging.open", side_effect=tracking_open):
                 logger = FsyncLineLogger(
                     tmpdir,
                     sync_type="demo",
@@ -190,7 +190,7 @@ class StagingReplayTests(unittest.TestCase):
                 import resource
                 import sys
 
-                from ch_bulk.cqc_api_enricher import load_cqc_staging
+                from ch_bulk.cqc.api_enricher import load_cqc_staging
 
                 def rss_mb():
                     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -328,8 +328,8 @@ class ParallelEnricherTests(unittest.TestCase):
                 import time
                 from unittest.mock import patch
 
-                from ch_bulk.cqc_api_client import APIResult
-                from ch_bulk.cqc_api_enricher import CQCAPIEnricher
+                from ch_bulk.cqc.api_client import APIResult
+                from ch_bulk.cqc.api_enricher import CQCAPIEnricher
 
                 data_dir, db_path = sys.argv[1], sys.argv[2]
                 payloads = {
@@ -355,7 +355,7 @@ class ParallelEnricherTests(unittest.TestCase):
                     time.sleep(0.05)
                     return APIResult(200, payloads[location_id])
 
-                with patch("ch_bulk.cqc_api_enricher.CQCAPIClient") as client_cls:
+                with patch("ch_bulk.cqc.api_enricher.CQCAPIClient") as client_cls:
                     client = client_cls.return_value.__enter__.return_value
                     client.get_location.side_effect = get_location
                     CQCAPIEnricher(data_dir, db_path).enrich_locations(
@@ -370,7 +370,7 @@ class ParallelEnricherTests(unittest.TestCase):
                 import time
                 from unittest.mock import patch
 
-                from ch_bulk.ch_enricher import enrich_directors
+                from ch_bulk.companies_house.ch_enricher import enrich_directors
 
                 data_dir, db_path = sys.argv[1], sys.argv[2]
                 officers = {
@@ -386,7 +386,7 @@ class ParallelEnricherTests(unittest.TestCase):
                     time.sleep(0.05)
                     return officers[company_number]
 
-                with patch("ch_bulk.ch_enricher.CompaniesHouseClient") as client_cls:
+                with patch("ch_bulk.companies_house.ch_enricher.CompaniesHouseClient") as client_cls:
                     client = client_cls.return_value.__enter__.return_value
                     client.get_officers.side_effect = get_officers
                     enrich_directors(

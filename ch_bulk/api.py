@@ -10,39 +10,40 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk._logging import setup_logging
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.ch_enricher import enrich_directors as _enrich_directors
-from ch_bulk.ch_enricher import load_director_staging as _load_director_staging
-from ch_bulk.classifier import WebsiteClassifier, load_classification_staging as _load_classification_staging
-from ch_bulk.ch_enricher import enrich_revenue as _enrich_revenue
-from ch_bulk.financials_enricher import enrich_financials as _enrich_financials
-from ch_bulk.financials_enricher import load_financials_staging as _load_financials_staging
-from ch_bulk.cqc_downloader import download_cqc_directory, download_hsca_filters
-from ch_bulk.cqc_api_enricher import CQCAPIEnricher, load_cqc_staging as _load_cqc_staging
-from ch_bulk.cqc_processor import process_cqc_csv, process_hsca_filters
-from ch_bulk.cqc_query import (
+from ch_bulk.core.logging import setup_logging
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.companies_house.ch_enricher import enrich_directors as _enrich_directors
+from ch_bulk.companies_house.ch_enricher import load_director_staging as _load_director_staging
+from ch_bulk.web.classifier import WebsiteClassifier, load_classification_staging as _load_classification_staging
+from ch_bulk.companies_house.ch_enricher import enrich_revenue as _enrich_revenue
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.companies_house.financials_enricher import enrich_financials as _enrich_financials
+from ch_bulk.companies_house.financials_enricher import load_financials_staging as _load_financials_staging
+from ch_bulk.cqc.downloader import download_cqc_directory, download_hsca_filters
+from ch_bulk.cqc.api_enricher import CQCAPIEnricher, load_cqc_staging as _load_cqc_staging
+from ch_bulk.cqc.processor import process_cqc_csv, process_hsca_filters
+from ch_bulk.cqc.query import (
     export_cqc_locations_csv as _export_cqc_locations_csv,
     export_cqc_providers_csv as _export_cqc_providers_csv,
     get_cqc_filter_options as _get_cqc_filter_options,
     query_cqc_locations,
     query_cqc_providers,
 )
-from ch_bulk.downloader import download_bulk_data
-from ch_bulk.matcher import match_companies_to_cqc
-from ch_bulk.migration import export_to_parquet as _export_to_parquet
-from ch_bulk.migration import import_from_parquet as _import_from_parquet
-from ch_bulk.processor import (
+from ch_bulk.companies_house.downloader import download_bulk_data
+from ch_bulk.matching.ch_cqc import match_companies_to_cqc
+from ch_bulk.db.migration import export_to_parquet as _export_to_parquet
+from ch_bulk.db.migration import import_from_parquet as _import_from_parquet
+from ch_bulk.companies_house.processor import (
     SanityCheckError,
     SanityCheckResult,
     compact_database,
     process_csvs,
 )
-from ch_bulk.query import export_query_csv, get_db_info, query_by_sic
-from ch_bulk.query import export_filtered_csv as _export_filtered_csv
-from ch_bulk.query import get_filter_options as _get_filter_options
-from ch_bulk.query import query_companies
-from ch_bulk.website_finder import (
+from ch_bulk.companies_house.query import export_query_csv, get_db_info, query_by_sic
+from ch_bulk.companies_house.query import export_filtered_csv as _export_filtered_csv
+from ch_bulk.companies_house.query import get_filter_options as _get_filter_options
+from ch_bulk.companies_house.query import query_companies
+from ch_bulk.web.website_finder import (
     WebsiteFinder,
     load_website_finder_staging as _load_website_finder_staging,
 )
@@ -78,7 +79,9 @@ class ChBulk:
 
     Example::
 
-        ch = ChBulk(data_dir="./data", db_path="data/db/ch_bulk.duckdb")
+        from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+
+        ch = ChBulk(data_dir=DEFAULT_DATA_DIR, db_path=DEFAULT_DB_PATH)
         ch.download()
         ch.process()
         companies = ch.query("62012")
@@ -92,11 +95,11 @@ class ChBulk:
 
     def __init__(
         self,
-        data_dir: str | Path = "./data",
-        db_path: str | Path = "data/db/ch_bulk.duckdb",
+        data_dir: str | Path | None = None,
+        db_path: str | Path | None = None,
     ) -> None:
-        self.data_dir = Path(data_dir)
-        self.db_path = Path(db_path)
+        self.data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+        self.db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
         setup_logging(self.data_dir)
 
     @property
@@ -169,7 +172,7 @@ class ChBulk:
 
         Raises:
             FileNotFoundError: If no CSV files are found.
-            ch_bulk.processor.SanityCheckError: If a sanity check fails
+            ch_bulk.companies_house.processor.SanityCheckError: If a sanity check fails
                 and ``force=False``. Inspect ``.result`` for the numbers.
         """
         if csv_files is None:
@@ -271,7 +274,7 @@ class ChBulk:
 
         Raises:
             FileNotFoundError: If no CQC CSV is found.
-            ch_bulk.processor.SanityCheckError: On sanity failure.
+            ch_bulk.companies_house.processor.SanityCheckError: On sanity failure.
         """
         if csv_file is None:
             candidates = sorted(self.cqc_dir.glob("cqc_directory_*.csv"))

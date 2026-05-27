@@ -30,7 +30,8 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from ch_bulk.api import ChBulk
-from ch_bulk.processor import SanityCheckError
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.companies_house.processor import SanityCheckError
 
 logger = logging.getLogger(__name__)
 
@@ -904,7 +905,7 @@ class SettingsPane(_PaneBase):
         self.save_status.pack(side="left", padx=(12, 0))
 
         # Footer: file path
-        from ch_bulk.settings import settings_path
+        from ch_bulk.core.settings import settings_path
         self.path_label = ttk.Label(
             self.frame,
             text=f"Settings file: {settings_path(self.ch.data_dir)}",
@@ -913,14 +914,14 @@ class SettingsPane(_PaneBase):
         self.path_label.pack(anchor="w", padx=10, pady=(20, 4))
 
     def refresh(self) -> None:
-        from ch_bulk.settings import load_settings
+        from ch_bulk.core.settings import load_settings
         self._settings = load_settings(self.ch.data_dir)
         self.ch_key_var.set(self._settings.get("api_keys", {}).get("companies_house", ""))
         self.cqc_key_var.set(self._settings.get("api_keys", {}).get("cqc", ""))
         self.save_status.configure(text="Loaded from disk", foreground="gray")
 
     def _on_save(self) -> None:
-        from ch_bulk.settings import save_settings
+        from ch_bulk.core.settings import save_settings
         from datetime import datetime
         if self._settings is None:
             self._settings = {}
@@ -943,8 +944,14 @@ class SettingsPane(_PaneBase):
 # ─────────────────────────────────────────────────────────────────────
 
 class ChBulkApp:
-    def __init__(self, db_path: str = "data/db/ch_bulk.duckdb", data_dir: str = "./data") -> None:
-        self.ch = ChBulk(data_dir=data_dir, db_path=db_path)
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        data_dir: str | Path | None = None,
+    ) -> None:
+        resolved_db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+        resolved_data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+        self.ch = ChBulk(data_dir=resolved_data_dir, db_path=resolved_db_path)
         self._task_running = False
         self._task_message = ""
         self._task_error: str | None = None
@@ -1148,9 +1155,14 @@ class ChBulkApp:
         self.root.mainloop()
 
 
-def main(db_path: str = "data/db/ch_bulk.duckdb", data_dir: str = "./data") -> None:
+def main(
+    db_path: str | Path | None = None,
+    data_dir: str | Path | None = None,
+) -> None:
     """Launch the Tkinter GUI."""
-    app = ChBulkApp(db_path=db_path, data_dir=data_dir)
+    resolved_db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+    resolved_data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+    app = ChBulkApp(db_path=resolved_db_path, data_dir=resolved_data_dir)
     app.run()
 
 

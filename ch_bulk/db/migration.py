@@ -11,7 +11,8 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
+from ch_bulk.core.paths import REPO_ROOT
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def _quote_ident(identifier: str) -> str:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    return REPO_ROOT
 
 
 def _source_git_sha() -> str | None:

@@ -13,8 +13,8 @@ from unittest.mock import patch
 import duckdb
 import requests
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.classifier import (
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.web.classifier import (
     StagedClassification,
     WebsiteClassifier,
     _extract_json_object,
@@ -198,9 +198,9 @@ class WebsiteClassifierTests(unittest.TestCase):
             ]
         }
 
-        with patch("ch_bulk.classifier.requests.Session.get", side_effect=fake_get):
+        with patch("ch_bulk.web.classifier.requests.Session.get", side_effect=fake_get):
             with patch(
-                "ch_bulk.classifier.httpx.Client.post",
+                "ch_bulk.web.classifier.httpx.Client.post",
                 return_value=DummyLLMResponse(llm_payload),
             ):
                 summary = WebsiteClassifier(tmpdir.name, db_path).classify(
@@ -270,17 +270,17 @@ class WebsiteClassifierTests(unittest.TestCase):
             ]
         }
 
-        with patch("ch_bulk.classifier.requests.Session.get", side_effect=fake_get):
+        with patch("ch_bulk.web.classifier.requests.Session.get", side_effect=fake_get):
             with patch(
-                "ch_bulk.classifier.browser.is_playwright_available",
+                "ch_bulk.web.classifier.browser.is_playwright_available",
                 return_value=True,
             ):
                 with patch(
-                    "ch_bulk.classifier.browser.fetch_rendered",
+                    "ch_bulk.web.classifier.browser.fetch_rendered",
                     return_value=rich_html,
                 ):
                     with patch(
-                        "ch_bulk.classifier.httpx.Client.post",
+                        "ch_bulk.web.classifier.httpx.Client.post",
                         return_value=DummyLLMResponse(llm_payload),
                     ):
                         summary = WebsiteClassifier(tmpdir.name, db_path).classify(
@@ -319,11 +319,11 @@ class WebsiteClassifierTests(unittest.TestCase):
         """
 
         with patch(
-            "ch_bulk.classifier.requests.Session.get",
+            "ch_bulk.web.classifier.requests.Session.get",
             return_value=DummyResponse(200, html),
         ):
             with patch(
-                "ch_bulk.classifier.httpx.Client.post",
+                "ch_bulk.web.classifier.httpx.Client.post",
                 return_value=DummyLLMResponse(
                     {"choices": [{"message": {"content": "not valid json"}}]}
                 ),
@@ -565,11 +565,11 @@ class WebsiteClassifierTests(unittest.TestCase):
         }
 
         with patch(
-            "ch_bulk.classifier.requests.Session.get",
+            "ch_bulk.web.classifier.requests.Session.get",
             return_value=DummyResponse(200, html),
         ):
             with patch(
-                "ch_bulk.classifier.httpx.Client.post",
+                "ch_bulk.web.classifier.httpx.Client.post",
                 return_value=DummyLLMResponse(llm_payload),
             ):
                 summary = WebsiteClassifier(tmpdir.name, db_path).classify(
@@ -591,14 +591,14 @@ class WebsiteClassifierTests(unittest.TestCase):
         """
 
         with patch(
-            "ch_bulk.classifier.requests.Session.get",
+            "ch_bulk.web.classifier.requests.Session.get",
             return_value=DummyResponse(200, html),
         ):
             with patch(
-                "ch_bulk.classifier.browser.fetch_rendered",
+                "ch_bulk.web.classifier.browser.fetch_rendered",
             ) as fetch_rendered:
                 with patch(
-                    "ch_bulk.classifier.httpx.Client.post",
+                    "ch_bulk.web.classifier.httpx.Client.post",
                     return_value=DummyLLMResponse(
                         {
                             "choices": [
@@ -634,11 +634,11 @@ class WebsiteClassifierTests(unittest.TestCase):
             raise requests.exceptions.ConnectTimeout("timed out")
 
         with patch(
-            "ch_bulk.classifier.requests.Session.get",
+            "ch_bulk.web.classifier.requests.Session.get",
             side_effect=always_timeout,
         ):
             with patch(
-                "ch_bulk.classifier.browser.fetch_rendered",
+                "ch_bulk.web.classifier.browser.fetch_rendered",
             ) as fetch_rendered:
                 summary = WebsiteClassifier(tmpdir.name, db_path).classify(
                     mode="list",
@@ -703,17 +703,17 @@ class WebsiteClassifierTests(unittest.TestCase):
             ]
         }
 
-        with patch("ch_bulk.classifier.requests.Session.get", side_effect=fake_get):
+        with patch("ch_bulk.web.classifier.requests.Session.get", side_effect=fake_get):
             with patch(
-                "ch_bulk.classifier.browser.PlaywrightSession",
+                "ch_bulk.web.classifier.browser.PlaywrightSession",
                 return_value=DummySession(),
             ) as session_ctor:
                 with patch(
-                    "ch_bulk.classifier.browser.fetch_rendered",
+                    "ch_bulk.web.classifier.browser.fetch_rendered",
                     side_effect=fake_fetch_rendered,
                 ) as fetch_rendered:
                     with patch(
-                        "ch_bulk.classifier.httpx.Client.post",
+                        "ch_bulk.web.classifier.httpx.Client.post",
                         return_value=DummyLLMResponse(llm_payload),
                     ):
                         summary = WebsiteClassifier(tmpdir.name, db_path).classify(

@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk.cqc_downloader import download_hsca_filters
-from ch_bulk.cqc_processor import process_hsca_filters
-from ch_bulk.processor import SanityCheckError
+from ch_bulk.cqc.downloader import download_hsca_filters
+from ch_bulk.cqc.processor import process_hsca_filters
+from ch_bulk.companies_house.processor import SanityCheckError
 
 
 class _MockResponse:
@@ -93,11 +93,11 @@ class HSCADownloaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
                 patch(
-                    "ch_bulk.cqc_downloader.httpx.get",
+                    "ch_bulk.cqc.downloader.httpx.get",
                     return_value=_MockResponse(listing_html),
                 ),
                 patch(
-                    "ch_bulk.cqc_downloader.httpx.stream",
+                    "ch_bulk.cqc.downloader.httpx.stream",
                     return_value=_MockStreamResponse([b"chunk-a", b"chunk-b"]),
                 ),
             ):

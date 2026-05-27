@@ -10,8 +10,8 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.matcher import match_companies_to_cqc
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.matching.ch_cqc import match_companies_to_cqc
 
 
 def _create_companies_table(con: duckdb.DuckDBPyConnection) -> None:

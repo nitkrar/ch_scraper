@@ -14,9 +14,9 @@ from pathlib import Path
 
 import duckdb
 
-logger = logging.getLogger(__name__)
+from ch_bulk.core.paths import SQL_DIR
 
-SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+logger = logging.getLogger(__name__)
 SCHEMA_FILES = [
     SQL_DIR / "cqc" / "bootstrap_hsca_locations.sql",
     SQL_DIR / "cqc" / "bootstrap_hsca_dual_registrations.sql",

@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.ch_enricher import compute_age_fields, enrich_directors, enrich_revenue
-from ch_bulk.revenue_model import estimate, load_bands
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.companies_house.ch_enricher import compute_age_fields, enrich_directors, enrich_revenue
+from ch_bulk.companies_house.revenue_model import estimate, load_bands
 
 
 class AgeFieldTests(unittest.TestCase):
@@ -255,7 +255,7 @@ class RevenueModelTests(unittest.TestCase):
             finally:
                 con.close()
 
-            with patch("ch_bulk.ch_enricher.CompaniesHouseClient") as client_cls:
+            with patch("ch_bulk.companies_house.ch_enricher.CompaniesHouseClient") as client_cls:
                 client = client_cls.return_value.__enter__.return_value
                 client.get_officers.side_effect = [
                     [{"officer_role": "director", "date_of_birth": {"year": 1960}}],
@@ -352,8 +352,8 @@ class RevenueModelTests(unittest.TestCase):
                     buffering_values.append(kwargs.get("buffering"))
                 return real_open(*args, **kwargs)
 
-            with patch("ch_bulk._logging.open", side_effect=tracking_open):
-                with patch("ch_bulk.ch_enricher.CompaniesHouseClient") as client_cls:
+            with patch("ch_bulk.core.logging.open", side_effect=tracking_open):
+                with patch("ch_bulk.companies_house.ch_enricher.CompaniesHouseClient") as client_cls:
                     client = client_cls.return_value.__enter__.return_value
                     client.get_officers.side_effect = [
                         [{"officer_role": "director", "date_of_birth": {"year": 1960}}],

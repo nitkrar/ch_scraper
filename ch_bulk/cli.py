@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ch_bulk.api import ChBulk
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
 
 app = typer.Typer(
     name="ch-bulk",
@@ -42,7 +43,7 @@ def _parse_ids(ids: Optional[str]) -> list[str] | None:
 @app.command()
 def download(
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory for downloads."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
     ),
     month: Optional[str] = typer.Option(
         None, "--month", "-m", help="Month as YYYY-MM (auto-detected if omitted)."
@@ -60,10 +61,10 @@ def download(
 @app.command()
 def process(
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with CSV files."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with CSV files."
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
 ) -> None:
     """Ingest downloaded CSVs into a DuckDB database."""
@@ -84,7 +85,7 @@ def query(
         None, "--output-csv", "-o", help="Export results to CSV file."
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     limit: Optional[int] = typer.Option(
         None, "--limit", "-n", help="Max results to return."
@@ -95,7 +96,7 @@ def query(
 
     if output_csv:
         # Export directly via DuckDB COPY — no memory load
-        from ch_bulk.query import export_query_csv
+        from ch_bulk.companies_house.query import export_query_csv
         try:
             n = export_query_csv(
                 db_path, sic_codes, output_csv,
@@ -144,10 +145,10 @@ def query(
 @app.command()
 def sync(
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory for downloads."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     month: Optional[str] = typer.Option(
         None, "--month", "-m", help="Month as YYYY-MM (auto-detected if omitted)."
@@ -170,7 +171,7 @@ def match_command(
         help="One of: incremental, all.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
 ) -> None:
     """Match active SIC-88100 companies to relevant CQC providers."""
@@ -191,7 +192,7 @@ def match_command(
 @app.command("export-sqlite")
 def export_sqlite(
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     output: Path = typer.Option(
         Path("ch_bulk.sqlite"), "--output", "-o", help="Output SQLite file path."
@@ -206,7 +207,7 @@ def export_sqlite(
 @app.command()
 def info(
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
 ) -> None:
     """Show database summary statistics."""
@@ -239,10 +240,10 @@ def info(
 @app.command()
 def ui(
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory for downloads."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
     ),
 ) -> None:
     """Launch the desktop GUI."""
@@ -274,10 +275,10 @@ def load_staging(
         help="Specific batch_id to replay; loads all pending files when omitted.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory containing staging files."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory containing staging files."
     ),
 ) -> None:
     ch = ChBulk(data_dir=data_dir, db_path=db_path)
@@ -305,10 +306,10 @@ def classify_command(
         help="Comma-separated company numbers when --mode=list.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with settings.json."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with settings.json."
     ),
     batch_size: int = typer.Option(
         100,
@@ -350,10 +351,10 @@ def find_websites_command(
         help="Delay between DDG searches to avoid rate limits.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with staging/log files."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with staging/log files."
     ),
 ) -> None:
     ch = ChBulk(data_dir=data_dir, db_path=db_path)
@@ -389,10 +390,10 @@ def cqc_enrich_providers(
         help="Comma-separated provider IDs when --mode=list.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with settings.json."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with settings.json."
     ),
     batch_size: int = typer.Option(
         1000,
@@ -428,10 +429,10 @@ def cqc_enrich_locations(
         help="Comma-separated location IDs when --mode=list.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with settings.json."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with settings.json."
     ),
     batch_size: int = typer.Option(
         1000,
@@ -468,10 +469,10 @@ def ch_enrich_directors(
         help="Re-enrich rows even if director DOB years already exist.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with settings.json."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with settings.json."
     ),
     batch_size: int = typer.Option(
         1000,
@@ -504,10 +505,10 @@ def ch_enrich_revenue(
         help="Comma-separated company numbers to enrich explicitly.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with settings.json."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with settings.json."
     ),
 ) -> None:
     ch = ChBulk(data_dir=data_dir, db_path=db_path)
@@ -553,10 +554,10 @@ def enrich_financials_command(
         help="Buffered staging size before each flush+fsync checkpoint.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory with settings.json."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory with settings.json."
     ),
 ) -> None:
     ch = ChBulk(data_dir=data_dir, db_path=db_path)
@@ -587,10 +588,10 @@ def migration_export(
         help="Output Parquet bundle directory.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory containing logs/settings."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory containing logs/settings."
     ),
 ) -> None:
     ch = ChBulk(data_dir=data_dir, db_path=db_path)
@@ -616,10 +617,10 @@ def migration_import(
         help="Clear the bundle's portable tables before importing.",
     ),
     db_path: Path = typer.Option(
-        Path("data/db/ch_bulk.duckdb"), "--db-path", help="DuckDB database path."
+        DEFAULT_DB_PATH, "--db-path", help="DuckDB database path."
     ),
     data_dir: Path = typer.Option(
-        Path("./data"), "--data-dir", "-d", help="Directory containing logs/settings."
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory containing logs/settings."
     ),
 ) -> None:
     ch = ChBulk(data_dir=data_dir, db_path=db_path)

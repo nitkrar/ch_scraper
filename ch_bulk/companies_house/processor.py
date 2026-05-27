@@ -27,6 +27,8 @@ from typing import Callable, TypeVar
 import duckdb
 from rich.console import Console
 
+from ch_bulk.core.paths import SQL_DIR as _ROOT_SQL_DIR
+
 logger = logging.getLogger(__name__)
 console = Console()
 
@@ -66,7 +68,7 @@ def timed_phase(label: str) -> Callable[[_F], _F]:
 ROW_COUNT_PCT_THRESHOLD = 5.0
 INACTIVE_CHURN_PCT_THRESHOLD = 5.0
 
-SQL_DIR = Path(__file__).resolve().parent.parent / "sql" / "ch"
+SQL_DIR = _ROOT_SQL_DIR / "ch"
 
 # Match the CH bulk filename pattern, e.g. BasicCompanyData-2026-05-01-part1_7.csv
 _CH_DATE_RE = re.compile(r"BasicCompanyData-(\d{4}-\d{2}-\d{2})-part\d+_\d+\.csv$")
@@ -619,7 +621,7 @@ def compact_database(
     # Heal the known pre-WP3 HSCA FK shape before COPY FROM DATABASE.
     # This migration is intentionally narrow and no-ops on normal CH/CQC
     # databases that never created the HSCA snapshot tables.
-    from ch_bulk.bootstrap import repair_pipeline_schema
+    from ch_bulk.db.bootstrap import repair_pipeline_schema
 
     repair_con = duckdb.connect(str(db_path))
     try:

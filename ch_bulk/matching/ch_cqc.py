@@ -12,8 +12,8 @@ from typing import Literal
 import duckdb
 from rapidfuzz import fuzz
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.sync_batches import utcnow_naive
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.sync_batches import utcnow_naive
 
 logger = logging.getLogger(__name__)
 

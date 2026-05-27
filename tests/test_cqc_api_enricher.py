@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.cqc_api_client import APIResult
-from ch_bulk.cqc_api_enricher import (
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.cqc.api_client import APIResult
+from ch_bulk.cqc.api_enricher import (
     CQCAPIEnricher,
     parse_location_payload,
     parse_provider_payload,
@@ -168,7 +168,7 @@ class CQCAPIEnricherTests(unittest.TestCase):
                 "locationIds": ["loc-1"],
             }
 
-            with patch("ch_bulk.cqc_api_enricher.CQCAPIClient") as client_cls:
+            with patch("ch_bulk.cqc.api_enricher.CQCAPIClient") as client_cls:
                 client = client_cls.return_value.__enter__.return_value
                 client.get_provider.return_value = APIResult(200, fake_payload)
 
@@ -277,7 +277,7 @@ class CQCAPIEnricherTests(unittest.TestCase):
                 "locationIds": ["loc-2"],
             }
 
-            with patch("ch_bulk.cqc_api_enricher.CQCAPIClient") as client_cls:
+            with patch("ch_bulk.cqc.api_enricher.CQCAPIClient") as client_cls:
                 client = client_cls.return_value.__enter__.return_value
                 client.get_provider.side_effect = [
                     APIResult(200, payload_1),
@@ -410,8 +410,8 @@ class CQCAPIEnricherTests(unittest.TestCase):
                     buffering_values.append(kwargs.get("buffering"))
                 return real_open(*args, **kwargs)
 
-            with patch("ch_bulk._logging.open", side_effect=tracking_open):
-                with patch("ch_bulk.cqc_api_enricher.CQCAPIClient") as client_cls:
+            with patch("ch_bulk.core.logging.open", side_effect=tracking_open):
+                with patch("ch_bulk.cqc.api_enricher.CQCAPIClient") as client_cls:
                     client = client_cls.return_value.__enter__.return_value
                     client.get_provider.side_effect = [
                         APIResult(200, payload) for payload in payloads

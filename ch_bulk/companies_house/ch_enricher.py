@@ -10,12 +10,13 @@ from pathlib import Path
 import duckdb
 import httpx
 
-from ch_bulk._logging import FsyncLineLogger
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.rate_limit import SlidingWindowThrottle
-from ch_bulk.revenue_model import estimate, load_bands
-from ch_bulk.settings import load_settings
-from ch_bulk.staging import (
+from ch_bulk.core.logging import FsyncLineLogger
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.core.paths import DATA_REFERENCE_DIR, DEFAULT_DATA_DIR
+from ch_bulk.core.rate_limit import SlidingWindowThrottle
+from ch_bulk.companies_house.revenue_model import estimate, load_bands
+from ch_bulk.core.settings import load_settings
+from ch_bulk.db.staging import (
     LoadedBatch,
     RAW_API_RESPONSE_INSERT_SQL,
     StagedAPIResponse,
@@ -29,7 +30,7 @@ from ch_bulk.staging import (
     sync_batch_progress,
     with_duckdb_connection,
 )
-from ch_bulk.sync_batches import (
+from ch_bulk.db.sync_batches import (
     finish_sync_batch,
     insert_sync_batch,
     update_sync_batch_progress,
@@ -89,12 +90,13 @@ def _coerce_int(value: object) -> int | None:
 class CompaniesHouseClient:
     def __init__(
         self,
-        data_dir: str | Path = "./data",
+        data_dir: str | Path | None = None,
         *,
         api_key: str | None = None,
     ) -> None:
+        data_dir_path = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
         if api_key is None:
-            api_key = load_settings(data_dir)["api_keys"]["companies_house"]
+            api_key = load_settings(data_dir_path)["api_keys"]["companies_house"]
         if not api_key:
             raise RuntimeError(
                 "Companies House API key is not configured in settings.json"
@@ -694,7 +696,7 @@ def _select_director_targets(
 
 def enrich_directors(
     db_path: str | Path,
-    data_dir: str | Path = "./data",
+    data_dir: str | Path | None = None,
     *,
     sic: str = "88100",
     company_numbers: list[str] | None = None,
@@ -702,6 +704,7 @@ def enrich_directors(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> dict[str, int | str]:
     db_path = Path(db_path)
+    data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
     batch_id: str | None = None
     run_log: FsyncLineLogger | None = None
     staging_writer: StagingWriter | None = None
@@ -956,14 +959,15 @@ def enrich_directors(
 
 def enrich_revenue(
     db_path: str | Path,
-    data_dir: str | Path = "./data",
+    data_dir: str | Path | None = None,
     *,
     sic: str = "88100",
     company_numbers: list[str] | None = None,
 ) -> dict[str, int]:
+    data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
     del data_dir
     db_path = Path(db_path)
-    bands_path = Path(__file__).resolve().parent.parent / "data" / "reference" / "revenue_bands.csv"
+    bands_path = DATA_REFERENCE_DIR / "revenue_bands.csv"
     bands = load_bands(bands_path)
 
     con = duckdb.connect(str(db_path))

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.migration import (
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.migration import (
     MANIFEST_FILENAME,
     PORTABLE_TABLES,
     export_to_parquet,

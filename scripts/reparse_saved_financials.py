@@ -12,8 +12,8 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.financials_enricher import (
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.companies_house.financials_enricher import (
     FINANCIALS_SYNC_TYPE,
     FilingCandidate,
     FinancialTarget,
@@ -26,8 +26,8 @@ from ch_bulk.financials_enricher import (
     _raw_filing_path,
     load_financials_staging,
 )
-from ch_bulk.staging import StagingWriter, truncate_incomplete_jsonl_tail
-from ch_bulk.sync_batches import insert_sync_batch
+from ch_bulk.db.staging import StagingWriter, truncate_incomplete_jsonl_tail
+from ch_bulk.db.sync_batches import insert_sync_batch
 
 
 @dataclass(frozen=True)

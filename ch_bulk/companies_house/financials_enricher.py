@@ -23,11 +23,12 @@ import requests
 from ixbrlparse import IXBRL
 from requests.adapters import HTTPAdapter
 
-from ch_bulk._logging import FsyncLineLogger
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.rate_limit import SlidingWindowThrottle
-from ch_bulk.settings import load_settings
-from ch_bulk.staging import (
+from ch_bulk.core.logging import FsyncLineLogger
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.core.paths import DEFAULT_DATA_DIR
+from ch_bulk.core.rate_limit import SlidingWindowThrottle
+from ch_bulk.core.settings import load_settings
+from ch_bulk.db.staging import (
     LoadedBatch,
     StagingWriter,
     batch_id_from_staging_path,
@@ -39,7 +40,7 @@ from ch_bulk.staging import (
     truncate_incomplete_jsonl_tail,
     with_duckdb_connection,
 )
-from ch_bulk.sync_batches import (
+from ch_bulk.db.sync_batches import (
     finish_sync_batch,
     insert_sync_batch,
     update_sync_batch_progress,
@@ -2116,7 +2117,7 @@ def load_financials_staging(
 
 def enrich_financials(
     db_path: str | Path,
-    data_dir: str | Path = "./data",
+    data_dir: str | Path | None = None,
     *,
     mode: str = "incremental",
     ids: list[str] | None = None,
@@ -2129,7 +2130,7 @@ def enrich_financials(
     validated_parser_workers = _validated_parser_workers(parser_workers)
     validated_batch_size = _validated_batch_size(batch_size)
     db_path = Path(db_path)
-    data_dir = Path(data_dir)
+    data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
     settings = load_settings(data_dir)
     api_key = str(settings["api_keys"]["companies_house"])
     if not api_key:

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.financials_enricher import (
+from ch_bulk.companies_house.financials_enricher import (
     FINANCIALS_SYNC_TYPE,
     IXBRL_EXTENSION,
     PDF_EXTENSION,
@@ -21,7 +21,7 @@ from ch_bulk.financials_enricher import (
     _parse_ixbrl_bytes,
     _parse_pdf_bytes,
 )
-from ch_bulk.staging import staging_path
+from ch_bulk.db.staging import staging_path
 
 
 def _parse_args() -> argparse.Namespace:

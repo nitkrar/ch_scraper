@@ -26,16 +26,16 @@ import duckdb
 import pandas as pd
 from rich.console import Console
 
-from ch_bulk.bootstrap import ensure_pipeline_schema
-from ch_bulk.processor import (
-    SQL_DIR as _CH_SQL_DIR,
+from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.core.paths import SQL_DIR as _ROOT_SQL_DIR
+from ch_bulk.companies_house.processor import (
     SanityCheckError,
     SanityCheckResult,
     _escape_path,
     compact_database,
     timed_phase,
 )
-from ch_bulk.sync_batches import finish_sync_batch, insert_sync_batch
+from ch_bulk.db.sync_batches import finish_sync_batch, insert_sync_batch
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -46,7 +46,7 @@ INACTIVE_CHURN_PCT_THRESHOLD = 5.0
 HSCA_ROW_COUNT_PCT_THRESHOLD = 10.0
 HSCA_CH_NUMBER_PCT_THRESHOLD = 10.0
 
-SQL_DIR = _CH_SQL_DIR.parent / "cqc"
+SQL_DIR = _ROOT_SQL_DIR / "cqc"
 
 HSCA_SHEET_NAME = "HSCA_Active_Locations"
 HSCA_DUAL_SHEET_NAME = "Dual_Registration_Locations"
