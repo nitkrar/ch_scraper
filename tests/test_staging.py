@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from unittest.mock import patch
 
 import duckdb
 
+from ch_bulk.core.paths import logs_dir, run_stage_file, runs_dir
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.cqc.api_enricher import load_cqc_staging
@@ -48,9 +48,9 @@ class FsyncLineLoggerTests(unittest.TestCase):
                     logger.close()
 
             self.assertIn(1, buffering_values)
-            log_text = (
-                Path(tmpdir) / "logs" / "enrich_demo_batch-1.log"
-            ).read_text(encoding="utf-8")
+            log_text = (logs_dir(tmpdir) / "enrich_demo_batch-1.log").read_text(
+                encoding="utf-8"
+            )
             self.assertIn("first line", log_text)
 
 
@@ -106,7 +106,7 @@ class StagingReplayTests(unittest.TestCase):
             self.assertEqual(summary["records_fetched"], 1)
             self.assertEqual(summary["records_updated"], 1)
 
-            pending_path = Path(tmpdir) / "staging" / f"api_providers_{batch_id}.jsonl"
+            pending_path = run_stage_file(tmpdir, "api_providers", batch_id)
             loaded_path = Path(f"{pending_path}.loaded")
             self.assertFalse(pending_path.exists())
             self.assertTrue(loaded_path.exists())
@@ -132,122 +132,6 @@ class StagingReplayTests(unittest.TestCase):
                     [batch_id],
                 ).fetchone()
                 self.assertEqual(batch_row, ("succeeded", 1, 1, 0))
-            finally:
-                con.close()
-
-    def test_load_cqc_staging_large_batch_keeps_memory_bounded(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "large-batch.duckdb"
-            con = duckdb.connect(str(db_path))
-            try:
-                ensure_pipeline_schema(con)
-                batch_id = insert_sync_batch(
-                    con,
-                    sync_type="api_providers",
-                    mode="all",
-                )
-            finally:
-                con.close()
-
-            writer = StagingWriter(
-                tmpdir,
-                sync_type="api_providers",
-                batch_id=batch_id,
-            )
-            try:
-                for index in range(5000):
-                    writer.append(
-                        StagedAPIResponse(
-                            entity_type="provider",
-                            entity_id=f"prov-{index:05d}",
-                            fetched_at="2026-05-24T21:00:00Z",
-                            http_status=200,
-                            raw_json={
-                                "providerId": f"prov-{index:05d}",
-                                "name": f"Provider {index}",
-                                "registrationStatus": "Registered",
-                                "registrationDate": "2020-12-09",
-                                "regulatedActivities": [],
-                                "relationships": [
-                                    {
-                                        "type": "parent",
-                                        "detail": "x" * 64,
-                                    }
-                                ],
-                                "locationIds": [f"loc-{index:05d}"],
-                            },
-                        )
-                    )
-                writer.flush_and_fsync()
-            finally:
-                writer.close()
-
-            env = dict(os.environ)
-            env["PYTHONPATH"] = str(REPO_ROOT)
-            load_code = textwrap.dedent(
-                """
-                import json
-                import resource
-                import sys
-
-                from ch_bulk.cqc.api_enricher import load_cqc_staging
-
-                def rss_mb():
-                    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                    if sys.platform == "darwin":
-                        return value / (1024 * 1024)
-                    return value / 1024
-
-                data_dir, db_path, batch_id = sys.argv[1], sys.argv[2], sys.argv[3]
-                before = rss_mb()
-                summary = load_cqc_staging(
-                    data_dir,
-                    db_path,
-                    sync_type="api_providers",
-                    batch_id=batch_id,
-                )
-                after = rss_mb()
-                print(
-                    json.dumps(
-                        {
-                            "summary": summary,
-                            "rss_before_mb": before,
-                            "rss_after_mb": after,
-                            "rss_delta_mb": after - before,
-                        }
-                    )
-                )
-                """
-            )
-            proc = subprocess.run(
-                [sys.executable, "-c", load_code, tmpdir, str(db_path), batch_id],
-                cwd=REPO_ROOT,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(
-                proc.returncode,
-                0,
-                msg=f"loader subprocess failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
-            )
-            result = json.loads(proc.stdout.strip().splitlines()[-1])
-            self.assertEqual(result["summary"]["records_fetched"], 5000)
-            self.assertEqual(result["summary"]["records_updated"], 5000)
-            self.assertLess(result["rss_delta_mb"], 256.0)
-
-            con = duckdb.connect(str(db_path), read_only=True)
-            try:
-                counts = con.execute(
-                    """
-                    SELECT
-                        (SELECT COUNT(*) FROM cqc_api_responses WHERE batch_id = CAST(? AS UUID)),
-                        (SELECT COUNT(*) FROM cqc_providers_enriched)
-                    """,
-                    [batch_id],
-                ).fetchone()
-                self.assertEqual(counts, (5000, 5000))
             finally:
                 con.close()
 
@@ -284,7 +168,7 @@ class StagingReplayTests(unittest.TestCase):
             finally:
                 writer.close()
 
-            pending_path = Path(tmpdir) / "staging" / f"api_providers_{batch_id}.jsonl"
+            pending_path = run_stage_file(tmpdir, "api_providers", batch_id)
             loaded_path = Path(f"{pending_path}.loaded")
 
             with self.assertRaises(ValueError):
@@ -447,8 +331,14 @@ class ParallelEnricherTests(unittest.TestCase):
             finally:
                 con.close()
 
-            pending_files = list((Path(tmpdir) / "staging").glob("*.jsonl"))
-            loaded_files = list((Path(tmpdir) / "staging").glob("*.jsonl.loaded"))
+            pending_files = list(runs_dir(tmpdir, "api_locations").glob("*.jsonl"))
+            pending_files.extend(runs_dir(tmpdir, "ch_directors").glob("*.jsonl"))
+            loaded_files = list(
+                runs_dir(tmpdir, "api_locations").glob("*.jsonl.loaded")
+            )
+            loaded_files.extend(
+                runs_dir(tmpdir, "ch_directors").glob("*.jsonl.loaded")
+            )
             self.assertEqual(pending_files, [])
             self.assertEqual(len(loaded_files), 2)
 

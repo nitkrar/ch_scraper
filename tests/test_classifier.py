@@ -13,6 +13,7 @@ from unittest.mock import patch
 import duckdb
 import requests
 
+from ch_bulk.core.paths import run_stage_file, runs_dir
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.web.classifier import (
     StagedClassification,
@@ -153,9 +154,9 @@ class WebsiteClassifierTests(unittest.TestCase):
         batch_id: str,
         rows: list[dict[str, object]],
     ) -> Path:
-        stage_dir = Path(tmpdir) / "staging"
+        stage_dir = runs_dir(tmpdir, "classifications") / batch_id
         stage_dir.mkdir(parents=True, exist_ok=True)
-        path = stage_dir / f"classifications_{batch_id}.jsonl"
+        path = stage_dir / "lane-main_p0001.jsonl"
         with path.open("w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row, sort_keys=True) + "\n")
@@ -537,9 +538,9 @@ class WebsiteClassifierTests(unittest.TestCase):
 
     def test_classify_ignores_unrelated_staging_files_on_startup(self):
         db_path, tmpdir = self._create_db()
-        stage_dir = Path(tmpdir.name) / "staging"
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        (stage_dir / "ch_directors_fixture.jsonl").write_text(
+        unrelated_path = run_stage_file(tmpdir.name, "ch_directors", "fixture")
+        unrelated_path.parent.mkdir(parents=True, exist_ok=True)
+        unrelated_path.write_text(
             '{"entity_type":"director"}\n',
             encoding="utf-8",
         )
@@ -798,10 +799,8 @@ class WebsiteClassifierTests(unittest.TestCase):
         finally:
             con.close()
 
-        stage_dir = Path(tmpdir.name) / "staging"
-        loaded_paths = sorted(
-            stage_dir.glob(f"classifications_{summary['batch_id']}*.jsonl.loaded")
-        )
+        batch_dir = runs_dir(tmpdir.name, "classifications") / str(summary["batch_id"])
+        loaded_paths = sorted(batch_dir.glob("*.jsonl.loaded"))
         self.assertGreaterEqual(len(loaded_paths), 6)
 
         staged_company_numbers: set[str] = set()
@@ -817,7 +816,7 @@ class WebsiteClassifierTests(unittest.TestCase):
 
     def test_load_classification_staging_sql_round_trip_five_row_fixture(self):
         db_path, tmpdir, batch_id = self._create_loader_db()
-        self._write_staged_rows(
+        pending_path = self._write_staged_rows(
             tmpdir.name,
             batch_id=batch_id,
             rows=[
@@ -905,9 +904,6 @@ class WebsiteClassifierTests(unittest.TestCase):
         self.assertEqual(summary["unable_count"], 3)
         self.assertEqual(summary["error_count"], 2)
 
-        pending_path = (
-            Path(tmpdir.name) / "staging" / f"classifications_{batch_id}.jsonl"
-        )
         self.assertFalse(pending_path.exists())
         self.assertTrue(Path(f"{pending_path}.loaded").exists())
 
@@ -990,9 +986,7 @@ class WebsiteClassifierTests(unittest.TestCase):
             self.skipTest("resource module unavailable")
 
         db_path, tmpdir, batch_id = self._create_loader_db()
-        path = (
-            Path(tmpdir.name) / "staging" / f"classifications_{batch_id}.jsonl"
-        )
+        path = runs_dir(tmpdir.name, "classifications") / batch_id / "lane-main_p0001.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             for idx in range(10_000):

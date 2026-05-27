@@ -28,7 +28,7 @@ from requests.adapters import HTTPAdapter
 from ch_bulk.web import browser
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH, runs_dir
 from ch_bulk.core.settings import load_settings
 from ch_bulk.db.staging import (
     LoadedBatch,
@@ -63,7 +63,6 @@ VALID_VERDICTS = {
     "Mixed_residential_domiciliary",
     "Unable to classify",
 }
-CLASSIFICATION_FILENAME_PREFIX = f"{CLASSIFICATION_SYNC_TYPE}_"
 LLM_REQUEST_FAILURE_REASON = "llm_request_error"
 CLASSIFICATION_ERROR_REASONS = {
     "all_pages_unreachable",
@@ -254,7 +253,7 @@ class ClassificationChunkWriter:
         self.data_dir = Path(data_dir)
         self.batch_id = batch_id
         self.lane = lane
-        self.stage_dir = self.data_dir / "staging"
+        self.stage_dir = runs_dir(self.data_dir, CLASSIFICATION_SYNC_TYPE) / self.batch_id
         self.stage_dir.mkdir(parents=True, exist_ok=True)
         self._part = 1
         self._path: Path | None = None
@@ -266,10 +265,7 @@ class ClassificationChunkWriter:
         return self._rows_in_file
 
     def _next_path(self) -> Path:
-        return self.stage_dir / (
-            f"{CLASSIFICATION_FILENAME_PREFIX}{self.batch_id}"
-            f"__{self.lane}_p{self._part:04d}.jsonl.open"
-        )
+        return self.stage_dir / f"lane-{self.lane}_p{self._part:04d}.jsonl.open"
 
     def _ensure_handle(self) -> None:
         if self._handle is not None:
@@ -452,15 +448,15 @@ def _batch_error_delta(row: StagedClassification) -> int:
 
 
 def _classification_batch_id_from_path(path: str | Path) -> str:
-    name = Path(path).name
+    stage_path = Path(path)
+    name = stage_path.name
     if name.endswith(".open"):
         name = name[:-5]
-    if not name.startswith(CLASSIFICATION_FILENAME_PREFIX) or not name.endswith(".jsonl"):
+    if name.endswith(".loaded"):
+        name = name[: -len(".loaded")]
+    if stage_path.parent.parent.name != CLASSIFICATION_SYNC_TYPE or not name.endswith(".jsonl"):
         raise ValueError(f"Unexpected classification staging file: {path}")
-    body = name[len(CLASSIFICATION_FILENAME_PREFIX) : -len(".jsonl")]
-    if "__" in body:
-        return body.split("__", 1)[0]
-    return body
+    return stage_path.parent.name
 
 
 def _pending_classification_staging_files(
@@ -469,18 +465,19 @@ def _pending_classification_staging_files(
     batch_id: str | None = None,
     include_open: bool = False,
 ) -> list[Path]:
-    stage_dir = Path(data_dir) / "staging"
+    stage_dir = runs_dir(data_dir, CLASSIFICATION_SYNC_TYPE)
     if not stage_dir.exists():
         return []
-    prefix = CLASSIFICATION_FILENAME_PREFIX
-    stem = f"{prefix}{batch_id}" if batch_id is not None else prefix
-    patterns = [f"{stem}*.jsonl"]
+    target_dir = stage_dir / batch_id if batch_id is not None else stage_dir
+    if not target_dir.exists():
+        return []
+    patterns = ["*.jsonl"] if batch_id is not None else ["*/*.jsonl"]
     if include_open:
-        patterns.append(f"{stem}*.jsonl.open")
+        patterns.append("*.jsonl.open" if batch_id is not None else "*/*.jsonl.open")
     paths: list[Path] = []
     for pattern in patterns:
-        paths.extend(stage_dir.glob(pattern))
-    deduped = sorted({path.resolve(): path for path in paths}.values())
+        paths.extend(target_dir.glob(pattern))
+    deduped = sorted({path.resolve(): path for path in paths}.values(), key=str)
     return deduped
 
 

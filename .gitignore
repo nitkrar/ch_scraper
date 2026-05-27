@@ -14,6 +14,9 @@ env/
 
 # Data files (large downloads, don't commit)
 data/*
+!data/old_staging/
+data/old_staging/*
+!data/old_staging/README.md
 fixture-data/
 # ...but track runtime reference data + the example settings template
 !data/reference/

@@ -12,6 +12,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ch_bulk.core.paths import logs_dir
+
 LOG_FILENAME = "ch-bulk.log"
 
 
@@ -21,7 +23,7 @@ def setup_logging(data_dir: str | Path, level: int = logging.INFO) -> Path:
     Idempotent: re-calling with the same path doesn't add duplicate
     handlers. Returns the log file path.
     """
-    log_dir = Path(data_dir) / "logs"
+    log_dir = logs_dir(data_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / LOG_FILENAME
 
@@ -59,7 +61,7 @@ class FsyncLineLogger:
         batch_id: str,
         filename_prefix: str | None = None,
     ) -> None:
-        log_dir = Path(data_dir) / "logs"
+        log_dir = logs_dir(data_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         if filename_prefix:
             self.path = log_dir / f"{filename_prefix}_{batch_id}.log"

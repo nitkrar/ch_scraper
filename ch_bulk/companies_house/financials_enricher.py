@@ -25,7 +25,7 @@ from requests.adapters import HTTPAdapter
 
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
-from ch_bulk.core.paths import DEFAULT_DATA_DIR
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, raw_filings_dir
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
 from ch_bulk.core.settings import load_settings
 from ch_bulk.db.staging import (
@@ -888,7 +888,7 @@ def _raw_filing_path(
 ) -> Path | None:
     if not filing_id:
         return None
-    filings_dir = Path(data_dir) / "staging" / "filings" / company_number
+    filings_dir = raw_filings_dir(data_dir, company_number)
     extension = _filing_extension_for_format(filing_format)
     if extension is not None:
         path = filings_dir / f"{filing_id}.{extension}"
@@ -1415,7 +1415,7 @@ def _save_raw_filing(
     extension: str,
     content: bytes,
 ) -> Path:
-    filings_dir = Path(data_dir) / "staging" / "filings" / company_number
+    filings_dir = raw_filings_dir(data_dir, company_number)
     filings_dir.mkdir(parents=True, exist_ok=True)
     target_path = filings_dir / f"{filing_id}.{extension}"
     with open(target_path, "wb") as handle:

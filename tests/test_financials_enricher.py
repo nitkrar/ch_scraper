@@ -6,6 +6,7 @@ import json
 import os
 import queue as std_queue
 import signal
+import shutil
 import tempfile
 import threading
 import time
@@ -18,6 +19,7 @@ import duckdb
 import requests
 from typer.testing import CliRunner
 
+from ch_bulk.core.paths import raw_filings_dir, run_stage_file, runs_dir
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.cli import app as cli_app
 from ch_bulk.companies_house.financials_enricher import (
@@ -40,6 +42,7 @@ from ch_bulk.companies_house.financials_enricher import (
 )
 from ch_bulk.db.staging import StagingWriter
 from ch_bulk.db.sync_batches import insert_sync_batch
+from tests.support.paths import fixture_path, make_test_workspace
 
 CLI_RUNNER = CliRunner()
 
@@ -124,6 +127,22 @@ def _insert_match(
         """,
         [company_number, provider_id, status],
     )
+
+
+def _copy_sample_ixbrl(
+    data_dir: str | Path,
+    *,
+    company_number: str,
+    filename: str,
+) -> Path:
+    target_dir = raw_filings_dir(data_dir, company_number)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / filename
+    shutil.copy(
+        fixture_path("financials", "ixbrl", "07545840", "sample.ixbrl"),
+        target_path,
+    )
+    return target_path
 
 
 class _FakeIXBRLDocument:
@@ -377,17 +396,15 @@ class FinancialParserTests(unittest.TestCase):
         self.assertEqual(facts.employee_count, 27)
 
     def test_parse_ixbrl_bytes_from_sample_file_matches_real_exact_facts(self):
-        sample_dir = (
-            Path(__file__).resolve().parent.parent
-            / "data"
-            / "staging"
-            / "filings"
-            / "07545840"
+        sample_path = fixture_path(
+            "financials",
+            "ixbrl",
+            "07545840",
+            "sample.ixbrl",
         )
-        sample_paths = sorted(sample_dir.glob("*.ixbrl"))
-        self.assertTrue(sample_paths, f"No sample IXBRL files found in {sample_dir}")
+        self.assertTrue(sample_path.exists(), f"Missing sample IXBRL file: {sample_path}")
 
-        facts = _parse_ixbrl_bytes(sample_paths[0].read_bytes())
+        facts = _parse_ixbrl_bytes(sample_path.read_bytes())
 
         self.assertEqual(facts.parse_status, "ok")
         self.assertIsNone(facts.parse_failure_reason)
@@ -636,13 +653,7 @@ class FinancialProcessTests(unittest.TestCase):
                 target=FinancialTarget("12345678", date(2024, 10, 31)),
                 data_dir=tmpdir,
             )
-            raw_path = (
-                Path(tmpdir)
-                / "staging"
-                / "filings"
-                / "12345678"
-                / "right-one.ixbrl"
-            )
+            raw_path = raw_filings_dir(tmpdir, "12345678") / "right-one.ixbrl"
             self.assertTrue(raw_path.exists())
             self.assertEqual(raw_path.read_bytes(), b"<?xml version='1.0'?><html></html>")
 
@@ -685,13 +696,7 @@ class FinancialProcessTests(unittest.TestCase):
                 target=FinancialTarget("12345678", date(2024, 10, 31)),
                 data_dir=tmpdir,
             )
-            raw_path = (
-                Path(tmpdir)
-                / "staging"
-                / "filings"
-                / "12345678"
-                / "paper-one.pdf"
-            )
+            raw_path = raw_filings_dir(tmpdir, "12345678") / "paper-one.pdf"
             self.assertTrue(raw_path.exists())
             self.assertEqual(raw_path.read_bytes(), b"%PDF-1.1 fixture")
 
@@ -737,13 +742,7 @@ class FinancialProcessTests(unittest.TestCase):
                 target=FinancialTarget("12345678", date(2024, 10, 31)),
                 data_dir=tmpdir,
             )
-            raw_path = (
-                Path(tmpdir)
-                / "staging"
-                / "filings"
-                / "12345678"
-                / "fallback-one.pdf"
-            )
+            raw_path = raw_filings_dir(tmpdir, "12345678") / "fallback-one.pdf"
             self.assertTrue(raw_path.exists())
             self.assertEqual(raw_path.read_bytes(), b"%PDF-1.1 fallback")
 
@@ -926,13 +925,7 @@ class FinancialTargetSelectionTests(unittest.TestCase):
 
     def test_select_targets_incremental_skips_saved_raw_files_on_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            raw_path = (
-                Path(tmpdir)
-                / "staging"
-                / "filings"
-                / "10000009"
-                / "saved-one.ixbrl"
-            )
+            raw_path = raw_filings_dir(tmpdir, "10000009") / "saved-one.ixbrl"
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_bytes(b"<html>fixture</html>")
 
@@ -1126,7 +1119,7 @@ class FinancialStagingTests(unittest.TestCase):
         self.assertEqual(summary["pdf_no_text_layer_count"], 0)
         self.assertEqual(summary["error_count"], 0)
 
-        pending_path = Path(tmpdir.name) / "staging" / f"financials_{batch_id}.jsonl"
+        pending_path = run_stage_file(tmpdir.name, "financials", batch_id)
         loaded_path = Path(f"{pending_path}.loaded")
         self.assertFalse(pending_path.exists())
         self.assertTrue(loaded_path.exists())
@@ -1202,13 +1195,7 @@ class FinancialStagingTests(unittest.TestCase):
 
     def test_replay_financials_fetch_staging_file_rebuilds_final_staging(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            raw_path = (
-                Path(tmpdir)
-                / "staging"
-                / "filings"
-                / "30000001"
-                / "replay-one.ixbrl"
-            )
+            raw_path = raw_filings_dir(tmpdir, "30000001") / "replay-one.ixbrl"
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_bytes(b"<html>fixture</html>")
 
@@ -1270,7 +1257,7 @@ class FinancialStagingTests(unittest.TestCase):
             self.assertFalse(manifest_path.exists())
             self.assertTrue(Path(f"{manifest_path}.loaded").exists())
 
-            staged_path = Path(tmpdir) / "staging" / f"financials_{batch_id}.jsonl"
+            staged_path = run_stage_file(tmpdir, "financials", batch_id)
             self.assertTrue(staged_path.exists())
             lines = staged_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
@@ -1309,31 +1296,13 @@ class FinancialStagingTests(unittest.TestCase):
         fake_client.__enter__.return_value = fake_client
         fake_client.__exit__.return_value = False
 
-        sample_dir = (
-            Path(__file__).resolve().parent.parent
-            / "data"
-            / "staging"
-            / "filings"
-            / "07545840"
+        ixbrl_raw_path = _copy_sample_ixbrl(
+            tmpdir.name,
+            company_number="30000011",
+            filename="ixbrl-one.ixbrl",
         )
-        sample_ixbrl_path = sorted(sample_dir.glob("*.ixbrl"))[0]
-        ixbrl_raw_path = (
-            Path(tmpdir.name)
-            / "staging"
-            / "filings"
-            / "30000011"
-            / "ixbrl-one.ixbrl"
-        )
-        ixbrl_raw_path.parent.mkdir(parents=True, exist_ok=True)
-        ixbrl_raw_path.write_bytes(sample_ixbrl_path.read_bytes())
 
-        pdf_raw_path = (
-            Path(tmpdir.name)
-            / "staging"
-            / "filings"
-            / "30000012"
-            / "pdf-one.pdf"
-        )
+        pdf_raw_path = raw_filings_dir(tmpdir.name, "30000012") / "pdf-one.pdf"
         pdf_raw_path.parent.mkdir(parents=True, exist_ok=True)
         pdf_raw_path.write_bytes(b"%PDF-1.1 fixture")
 
@@ -1413,8 +1382,10 @@ class FinancialStagingTests(unittest.TestCase):
         self.assertEqual(summary["error_count"], 0)
 
         batch_id = str(summary["batch_id"])
-        fetch_manifest_path = (
-            Path(tmpdir.name) / "staging" / f"financials_fetch_{batch_id}.jsonl"
+        fetch_manifest_path = run_stage_file(
+            tmpdir.name,
+            "financials_fetch",
+            batch_id,
         )
         self.assertFalse(fetch_manifest_path.exists())
         loaded_fetch_manifest_path = Path(f"{fetch_manifest_path}.loaded")
@@ -1564,36 +1535,38 @@ class FinancialStagingTests(unittest.TestCase):
         self.assertIn("input_queue=", log_text)
 
     def test_enrich_financials_cli_passes_parser_worker_option(self):
-        with patch(
-            "ch_bulk.cli.ChBulk.enrich_financials",
-            return_value={
-                "batch_id": "cli-batch",
-                "requested": 1,
-                "records_updated": 1,
-                "ok_count": 1,
-                "partial_count": 0,
-                "pdf_no_text_layer_count": 0,
-                "error_count": 0,
-            },
-        ) as mock_enrich:
-            result = CLI_RUNNER.invoke(
-                cli_app,
-                [
-                    "enrich-financials",
-                    "--mode",
-                    "list",
-                    "--ids",
-                    "30000011",
-                    "--workers",
-                    "2",
-                    "--parser-workers",
-                    "5",
-                    "--db-path",
-                    "fixture.duckdb",
-                    "--data-dir",
-                    "fixture-data",
-                ],
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir, db_path = make_test_workspace(tmpdir, db_name="fixture.duckdb")
+            with patch(
+                "ch_bulk.cli.ChBulk.enrich_financials",
+                return_value={
+                    "batch_id": "cli-batch",
+                    "requested": 1,
+                    "records_updated": 1,
+                    "ok_count": 1,
+                    "partial_count": 0,
+                    "pdf_no_text_layer_count": 0,
+                    "error_count": 0,
+                },
+            ) as mock_enrich:
+                result = CLI_RUNNER.invoke(
+                    cli_app,
+                    [
+                        "enrich-financials",
+                        "--mode",
+                        "list",
+                        "--ids",
+                        "30000011",
+                        "--workers",
+                        "2",
+                        "--parser-workers",
+                        "5",
+                        "--db-path",
+                        str(db_path),
+                        "--data-dir",
+                        str(data_dir),
+                    ],
+                )
 
         self.assertEqual(result.exit_code, 0, msg=result.stdout)
         mock_enrich.assert_called_once_with(
@@ -1667,13 +1640,7 @@ class FinancialStagingTests(unittest.TestCase):
             with open(staged_path, "a", encoding="utf-8") as handle:
                 handle.write('{"company_number":"broken-tail"')
 
-            raw_path = (
-                Path(tmpdir)
-                / "staging"
-                / "filings"
-                / "30000002"
-                / "replay-two.ixbrl"
-            )
+            raw_path = raw_filings_dir(tmpdir, "30000002") / "replay-two.ixbrl"
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_bytes(b"<html>fixture</html>")
 
@@ -1872,8 +1839,8 @@ class FinancialStagingTests(unittest.TestCase):
         original_flush_and_fsync = StagingWriter.flush_and_fsync
 
         def counting_flush_and_fsync(writer_self: StagingWriter) -> None:
-            if writer_self.path.name.startswith("financials_fetch_"):
-                fetch_flush_calls.append(writer_self.path.name)
+            if writer_self.path.parent.name == "financials_fetch":
+                fetch_flush_calls.append(str(writer_self.path))
             original_flush_and_fsync(writer_self)
 
         with (
@@ -1928,23 +1895,11 @@ class FinancialStagingTests(unittest.TestCase):
         finally:
             con.close()
 
-        sample_dir = (
-            Path(__file__).resolve().parent.parent
-            / "data"
-            / "staging"
-            / "filings"
-            / "07545840"
+        ixbrl_raw_path = _copy_sample_ixbrl(
+            tmpdir.name,
+            company_number="30000041",
+            filename="signal-one.ixbrl",
         )
-        sample_ixbrl_path = sorted(sample_dir.glob("*.ixbrl"))[0]
-        ixbrl_raw_path = (
-            Path(tmpdir.name)
-            / "staging"
-            / "filings"
-            / "30000041"
-            / "signal-one.ixbrl"
-        )
-        ixbrl_raw_path.parent.mkdir(parents=True, exist_ok=True)
-        ixbrl_raw_path.write_bytes(sample_ixbrl_path.read_bytes())
 
         fake_client = MagicMock()
         fake_client.__enter__.return_value = fake_client
@@ -2025,14 +1980,8 @@ class FinancialStagingTests(unittest.TestCase):
             timer.join(timeout=1.0)
 
         self.assertEqual(fetch_calls, ["30000041"])
-        pending_fetch_files = sorted(
-            (Path(tmpdir.name) / "staging").glob("financials_fetch_*.jsonl")
-        )
-        pending_final_files = sorted(
-            path
-            for path in (Path(tmpdir.name) / "staging").glob("financials_*.jsonl")
-            if not path.name.startswith("financials_fetch_")
-        )
+        pending_fetch_files = sorted(runs_dir(tmpdir.name, "financials_fetch").glob("*.jsonl"))
+        pending_final_files = sorted(runs_dir(tmpdir.name, "financials").glob("*.jsonl"))
         self.assertEqual(len(pending_fetch_files), 1)
         self.assertEqual(len(pending_final_files), 1)
         self.assertEqual(
@@ -2134,7 +2083,7 @@ class FinancialStagingTests(unittest.TestCase):
         self.assertEqual(summary["error_count"], 1)
         self.assertEqual(summary["stale_failed_batches"], 0)
 
-        pending_path = Path(tmpdir.name) / "staging" / f"financials_{batch_id}.jsonl"
+        pending_path = run_stage_file(tmpdir.name, "financials", batch_id)
         self.assertFalse(pending_path.exists())
         self.assertTrue(Path(f"{pending_path}.loaded").exists())
 

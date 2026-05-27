@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import duckdb
 
+from ch_bulk.core.paths import run_stage_file
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.db.sync_batches import insert_sync_batch
 from ch_bulk.web.search import DuckDuckGoSearcher, URLCheckResult
@@ -167,9 +168,8 @@ class WebsiteFinderLoaderTests(unittest.TestCase):
         batch_id: str,
         rows: list[StagedWebsiteSearch],
     ) -> Path:
-        stage_dir = Path(tmpdir) / "staging"
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        path = stage_dir / f"website_finder_{batch_id}.jsonl"
+        path = run_stage_file(tmpdir, "website_finder", batch_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(row.to_json_line() + "\n")

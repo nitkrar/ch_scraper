@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import duckdb
 
+from ch_bulk.core.paths import run_stage_file
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.cqc.api_client import APIResult
 from ch_bulk.cqc.api_enricher import (
@@ -177,10 +178,8 @@ class CQCAPIEnricherTests(unittest.TestCase):
             self.assertEqual(summary["records_updated"], 1)
             self.assertTrue(str(summary["log_path"]).endswith(".log"))
             self.assertTrue(
-                (
-                    Path(tmpdir)
-                    / "staging"
-                    / f"api_providers_{summary['batch_id']}.jsonl.loaded"
+                Path(
+                    f"{run_stage_file(tmpdir, 'api_providers', str(summary['batch_id']))}.loaded"
                 ).exists()
             )
 
@@ -424,10 +423,8 @@ class CQCAPIEnricherTests(unittest.TestCase):
 
             self.assertIn(1, buffering_values)
             self.assertTrue(
-                (
-                    Path(tmpdir)
-                    / "staging"
-                    / f"api_providers_{summary['batch_id']}.jsonl.loaded"
+                Path(
+                    f"{run_stage_file(tmpdir, 'api_providers', str(summary['batch_id']))}.loaded"
                 ).exists()
             )
             log_text = Path(str(summary["log_path"])).read_text(encoding="utf-8")

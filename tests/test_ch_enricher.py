@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import duckdb
 
+from ch_bulk.core.paths import DATA_REFERENCE_DIR, run_stage_file
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.companies_house.ch_enricher import compute_age_fields, enrich_directors, enrich_revenue
 from ch_bulk.companies_house.revenue_model import estimate, load_bands
@@ -61,12 +62,7 @@ class AgeFieldTests(unittest.TestCase):
 
 class RevenueModelTests(unittest.TestCase):
     def test_load_bands_and_estimate(self):
-        bands_path = (
-            Path(__file__).resolve().parent.parent
-            / "data"
-            / "reference"
-            / "revenue_bands.csv"
-        )
+        bands_path = DATA_REFERENCE_DIR / "revenue_bands.csv"
         bands = load_bands(bands_path)
         self.assertGreaterEqual(len(bands), 5)
         self.assertEqual(estimate(75, bands), 3000000.0)
@@ -273,10 +269,8 @@ class RevenueModelTests(unittest.TestCase):
             self.assertEqual(summary["no_active_directors"], 1)
             self.assertEqual(summary["error_count"], 1)
             self.assertTrue(
-                (
-                    Path(tmpdir)
-                    / "staging"
-                    / f"ch_directors_{summary['batch_id']}.jsonl.loaded"
+                Path(
+                    f"{run_stage_file(tmpdir, 'ch_directors', str(summary['batch_id']))}.loaded"
                 ).exists()
             )
             current_year = datetime.now(timezone.utc).year
@@ -369,10 +363,8 @@ class RevenueModelTests(unittest.TestCase):
 
             self.assertIn(1, buffering_values)
             self.assertTrue(
-                (
-                    Path(tmpdir)
-                    / "staging"
-                    / f"ch_directors_{summary['batch_id']}.jsonl.loaded"
+                Path(
+                    f"{run_stage_file(tmpdir, 'ch_directors', str(summary['batch_id']))}.loaded"
                 ).exists()
             )
             log_text = Path(str(summary["log_path"])).read_text(encoding="utf-8")

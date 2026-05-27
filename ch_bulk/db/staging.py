@@ -13,6 +13,7 @@ from typing import Any, Callable, TypeVar
 
 import duckdb
 
+from ch_bulk.core.paths import run_stage_file, runs_dir
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.db.sync_batches import finish_sync_batch, update_sync_batch_progress
 
@@ -82,9 +83,9 @@ def staging_path(
     sync_type: str,
     batch_id: str,
 ) -> Path:
-    stage_dir = Path(data_dir) / "staging"
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    return stage_dir / f"{sync_type}_{batch_id}.jsonl"
+    stage_path = run_stage_file(data_dir, sync_type, batch_id)
+    stage_path.parent.mkdir(parents=True, exist_ok=True)
+    return stage_path
 
 
 def pending_staging_files(
@@ -93,22 +94,26 @@ def pending_staging_files(
     sync_type: str,
     batch_id: str | None = None,
 ) -> list[Path]:
-    stage_dir = Path(data_dir) / "staging"
+    stage_dir = runs_dir(data_dir, sync_type)
     if not stage_dir.exists():
         return []
     if batch_id is not None:
-        candidate = stage_dir / f"{sync_type}_{batch_id}.jsonl"
+        candidate = run_stage_file(data_dir, sync_type, batch_id)
         return [candidate] if candidate.exists() else []
-    return sorted(stage_dir.glob(f"{sync_type}_*.jsonl"))
+    return sorted(stage_dir.glob("*.jsonl"))
 
 
 def batch_id_from_staging_path(sync_type: str, path: str | Path) -> str:
-    name = Path(path).name
-    prefix = f"{sync_type}_"
+    stage_path = Path(path)
+    if stage_path.parent.name != sync_type:
+        raise ValueError(f"Unexpected staging directory for {sync_type}: {path}")
+    name = stage_path.name
+    if name.endswith(".loaded"):
+        name = name[: -len(".loaded")]
     suffix = ".jsonl"
-    if not name.startswith(prefix) or not name.endswith(suffix):
+    if not name.endswith(suffix):
         raise ValueError(f"Unexpected staging file for {sync_type}: {path}")
-    return name[len(prefix) : -len(suffix)]
+    return Path(name).stem
 
 
 def truncate_incomplete_jsonl_tail(path: str | Path) -> int:
