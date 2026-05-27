@@ -8,9 +8,10 @@ than deleted.
 
 The orchestration logic lives in this module. The actual SQL — the
 sanity checks, the bootstrap, the upsert merge — lives in
-`../sql/ch/` so each step is runnable standalone in the duckdb CLI.
+`../db/sql/ch/` so each step is runnable standalone in the duckdb CLI.
 
-See sql/README.md for the layout and how to run those files by hand.
+See `ch_bulk/db/sql/README.md` for the layout and how to run those
+files by hand.
 """
 
 from __future__ import annotations
@@ -63,7 +64,8 @@ def timed_phase(label: str) -> Callable[[_F], _F]:
     return decorator
 
 # Thresholds for the upsert sanity checks. Mirror the comment block in
-# sql/ch/sanity_checks.sql. The duplicate check is strict zero and
+# ch_bulk/db/sql/ch/sanity_checks.sql. The duplicate check is strict
+# zero and
 # cannot be overridden by force=True.
 ROW_COUNT_PCT_THRESHOLD = 5.0
 INACTIVE_CHURN_PCT_THRESHOLD = 5.0
@@ -76,7 +78,7 @@ _CH_DATE_RE = re.compile(r"BasicCompanyData-(\d{4}-\d{2}-\d{2})-part\d+_\d+\.csv
 
 @dataclass(frozen=True)
 class SanityCheckResult:
-    """One row's worth of metrics from sql/ch/sanity_checks.sql.
+    """One row's worth of metrics from ch_bulk/db/sql/ch/sanity_checks.sql.
 
     Exposed on :class:`SanityCheckError` so callers (the GUI popup,
     the CLI) can render a useful message without re-running the query.
@@ -126,7 +128,7 @@ def _escape_path(p: Path) -> str:
 
 
 def _run_sql_file(con: duckdb.DuckDBPyConnection, name: str, **subs) -> None:
-    """Execute one SQL file from ``sql/ch/``.
+    """Execute one SQL file from ``ch_bulk/db/sql/ch/``.
 
     Optional keyword arguments substitute ``{{name}}`` placeholders in
     the SQL text before execution. Use for values DuckDB's parameter
@@ -182,7 +184,7 @@ def _ingest_to_staging(
 
     The big SELECT lives here in Python (not in a SQL file) because the
     file list is dynamic. A standalone reference copy of this query
-    lives at ``sql/ch/_examples/staging_ingest.sql.example`` for ad-hoc
+    lives at ``ch_bulk/db/sql/ch/_examples/staging_ingest.sql.example`` for ad-hoc
     debugging — any change here must be mirrored there.
     """
     con.execute("DROP TABLE IF EXISTS companies_staging")
@@ -464,7 +466,7 @@ def process_csvs(
     if you have files from multiple months.
 
     First call (no ``companies`` table): bootstraps from staging.
-    Subsequent calls: merges via ``sql/ch/upsert_companies.sql``, with
+    Subsequent calls: merges via ``ch_bulk/db/sql/ch/upsert_companies.sql``, with
     sanity checks gating the merge.
 
     Args:

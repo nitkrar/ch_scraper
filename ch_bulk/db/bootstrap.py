@@ -1,7 +1,8 @@
 """Schema bootstrap helpers for the homecare pipeline extensions.
 
-The SQL files live in ``sql/`` so they remain runnable in DuckDB
-directly. This module only orchestrates the order and the one piece of
+The SQL files live in ``ch_bulk/db/sql/`` so they remain runnable in
+DuckDB directly while staying colocated with the Python that reads
+them. This module only orchestrates the order and the one piece of
 branching the SQL should not own: ``tiered_targets`` depends on the CH
 ``companies`` table, so view creation is deferred until that table
 exists.

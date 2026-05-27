@@ -3,7 +3,7 @@
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SQL_DIR = REPO_ROOT / "sql"
+SQL_DIR = REPO_ROOT / "ch_bulk" / "db" / "sql"
 DEFAULT_DATA_DIR = REPO_ROOT / "data"
 DATA_REFERENCE_DIR = DEFAULT_DATA_DIR / "reference"
 DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "db" / "ch_bulk.duckdb"
@@ -38,7 +38,7 @@ def derived_dir(data_dir: Path | str, domain: str) -> Path:
 
 
 def archive_dir(data_dir: Path | str, source: str) -> Path:
-    return staging_root(data_dir) / "archive" / source
+    return Path(data_dir) / "archive" / source
 
 
 def validation_dir(data_dir: Path | str) -> Path:

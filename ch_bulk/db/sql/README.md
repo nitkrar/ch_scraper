@@ -1,10 +1,10 @@
 # SQL library
 
-Versioned SQL files used by `ch_bulk/processor.py`. Each file is
+Versioned SQL files used by the `ch_bulk` ingest modules. Each file is
 standalone-runnable in the DuckDB CLI for debugging and ad-hoc work.
 
 ```
-sql/
+ch_bulk/db/sql/
 ├── ch/                              ← Companies House bulk pipeline
 │   ├── sanity_row_count.sql         ← compare staging vs companies totals
 │   ├── sanity_inactive_churn.sql    ← count would-be-inactivated rows
@@ -18,8 +18,10 @@ sql/
 
 ## When to use these directly
 
-The Python orchestrator (`ch_bulk/processor.py`) runs the right files in the
-right order for normal use. You'd reach into this directory when:
+The Python orchestrators (`ch_bulk/companies_house/processor.py`,
+`ch_bulk/cqc/processor.py`, `ch_bulk/db/bootstrap.py`) run the right
+files in the right order for normal use. You'd reach into this
+directory when:
 
 - **Debugging a failed upsert.** Open the DB in `duckdb` and re-run a single
   step to see what it produces.
@@ -33,10 +35,10 @@ right order for normal use. You'd reach into this directory when:
 
 ```bash
 $ duckdb ch_bulk.duckdb
-D .read sql/ch/sanity_row_count.sql       -- just look
-D .read sql/ch/sanity_inactive_churn.sql  -- just look
+D .read ch_bulk/db/sql/ch/sanity_row_count.sql       -- just look
+D .read ch_bulk/db/sql/ch/sanity_inactive_churn.sql  -- just look
 D BEGIN TRANSACTION;
-D .read sql/ch/upsert_companies.sql       -- actually merge
+D .read ch_bulk/db/sql/ch/upsert_companies.sql       -- actually merge
 D COMMIT;                                  -- or ROLLBACK
 ```
 
@@ -58,5 +60,5 @@ that string at runtime, which is why the live version isn't in this dir.
 - **New sanity check?** New file: `sanity_<name>.sql`. Keep each check
   in its own file so the orchestrator can choose which to run.
 - **New index?** Add to `indexes.sql`. The file is one logical concept.
-- **New data source (e.g. CQC, PSC)?** New subdirectory: `sql/<source>/`.
+- **New data source (e.g. CQC, PSC)?** New subdirectory: `ch_bulk/db/sql/<source>/`.
   Don't cross sources in a single file.
