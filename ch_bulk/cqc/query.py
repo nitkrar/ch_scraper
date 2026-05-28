@@ -176,7 +176,7 @@ def query_cqc_locations(
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_locations{where_sql}"
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         total = con.execute(count_sql, params).fetchone()[0]
         result = con.execute(data_sql, params)
@@ -227,7 +227,7 @@ def query_cqc_providers(
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_providers{where_sql}"
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         total = con.execute(count_sql, params).fetchone()[0]
         result = con.execute(data_sql, params)
@@ -244,7 +244,7 @@ def get_cqc_filter_options(db_path: str | Path) -> dict:
     db_path = Path(db_path)
     if not db_path.exists():
         return {"service_types": [], "regions": [], "local_authorities": []}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         service_types = [
             r[0] for r in con.execute("""
@@ -291,7 +291,7 @@ def export_cqc_locations_csv(
         f"TO '{str(output_path).replace(chr(39), chr(39)*2)}' (HEADER, DELIMITER ',')"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_locations{where_sql}"
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         n = con.execute(count_sql, params).fetchone()[0]
         con.execute(sql, params)
@@ -314,7 +314,7 @@ def export_cqc_providers_csv(
         f"TO '{str(output_path).replace(chr(39), chr(39)*2)}' (HEADER, DELIMITER ',')"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_providers{where_sql}"
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         n = con.execute(count_sql, params).fetchone()[0]
         con.execute(sql, params)

@@ -604,7 +604,7 @@ class ChBulk:
         # Escape path for safe SQL embedding (backslashes then single quotes)
         safe_path = str(output_path).replace("\\", "\\\\").replace("'", "''")
 
-        con = duckdb.connect(str(self.db_path), read_only=True)
+        con = duckdb.connect(str(self.db_path))
         try:
             con.execute("INSTALL sqlite; LOAD sqlite;")
             con.execute(

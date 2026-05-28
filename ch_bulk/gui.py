@@ -879,7 +879,7 @@ class CQCPane(_PaneBase):
     def refresh(self) -> None:
         import duckdb
         try:
-            con = duckdb.connect(str(self.ch.db_path), read_only=True)
+            con = duckdb.connect(str(self.ch.db_path))
             try:
                 loc = con.execute("SELECT COUNT(*) FROM cqc_locations").fetchone()[0]
                 active = con.execute(
@@ -1035,6 +1035,20 @@ class ChBulkApp:
         self.root.geometry("1200x800")
         self.root.minsize(950, 600)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Route Cmd-Q (macOS) and Ctrl-Q / Ctrl-W (Linux/Windows) through
+        # _on_close. On macOS we MUST use ::tk::mac::Quit instead of
+        # bind_all("<Command-q>", ...) — the latter races Tk's built-in
+        # Cmd-Q handler and crashes with a GIL fatal error if the user's
+        # handler destroys root before Tk's handler returns.
+        try:
+            self.root.createcommand("::tk::mac::Quit", self._on_close)
+        except tk.TclError:
+            # Non-macOS Tk doesn't have ::tk::mac::Quit; fall through to
+            # Ctrl-Q / Ctrl-W binding below.
+            pass
+        self.root.bind_all("<Control-q>", lambda _e: self._on_close())
+        self.root.bind_all("<Control-w>", lambda _e: self._on_close())
 
         # Outer layout: left nav | content | (bottom strip pinned below)
         outer = ttk.Frame(self.root)
@@ -1219,7 +1233,23 @@ class ChBulkApp:
 
     def _on_close(self) -> None:
         if self._task_running:
-            self._set_status("Closing... waiting for background task to finish safely.")
+            # Background worker (e.g. CQC ingest, HSCA process) is running.
+            # Daemon threads stuck in DuckDB native code can keep the Python
+            # process alive after root.destroy(), so ask before nuking them.
+            confirm = messagebox.askyesno(
+                "Background task running",
+                "A background task is still running and may be writing to the database.\n\n"
+                "Quitting now will force-kill it (DB may be left in a recoverable but uncompacted state).\n\n"
+                "Force quit?",
+            )
+            if not confirm:
+                return
+            self.root.destroy()
+            # Daemon threads blocked in DuckDB C-extension calls won't honor
+            # interpreter shutdown. os._exit is the only way to guarantee the
+            # process actually ends.
+            import os
+            os._exit(0)
         self.root.destroy()
 
     def run(self) -> None:

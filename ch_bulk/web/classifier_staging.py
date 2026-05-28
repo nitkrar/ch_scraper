@@ -528,7 +528,7 @@ def load_classification_staging(
                 )
             return totals
 
-        batch_totals = with_duckdb_connection(db_path, read_totals, read_only=True)
+        batch_totals = with_duckdb_connection(db_path, read_totals)
 
     return {
         "sync_type": CLASSIFICATION_SYNC_TYPE,

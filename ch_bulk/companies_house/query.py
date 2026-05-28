@@ -85,7 +85,7 @@ def query_by_sic(
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         result = con.execute(sql, params)
         columns = [desc[0] for desc in result.description]
@@ -180,7 +180,7 @@ def get_db_info(db_path: str | Path) -> dict:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         # Total companies
         total: int = con.execute(
@@ -352,7 +352,7 @@ def query_companies(
     )
     count_sql = f"SELECT COUNT(*) FROM companies{where_sql}"
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         # Fetch total count
         total_count: int = con.execute(
@@ -376,7 +376,7 @@ def get_filter_options(db_path: str | Path) -> dict:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = duckdb.connect(str(db_path))
     try:
         statuses = [
             row[0]
