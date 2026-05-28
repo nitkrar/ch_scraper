@@ -472,21 +472,41 @@ class CQCPane(_PaneBase):
         # DB status (shared across sub-views)
         self.status_frame = ttk.LabelFrame(self.frame, text="Database")
         self.status_frame.pack(fill="x", padx=10, pady=4)
-        row = ttk.Frame(self.status_frame)
-        row.pack(fill="x", padx=8, pady=6)
+        status_row = ttk.Frame(self.status_frame)
+        status_row.pack(fill="x", padx=8, pady=(6, 4))
         self.status_indicator = ttk.Label(
-            row, text="● Not loaded", foreground="red",
+            status_row, text="● Not loaded", foreground="red",
             font=("TkDefaultFont", 11, "bold"),
         )
         self.status_indicator.pack(side="left")
-        self.status_detail = ttk.Label(row, text="", foreground="gray")
+        self.status_detail = ttk.Label(status_row, text="", foreground="gray")
         self.status_detail.pack(side="left", padx=(8, 0))
-        self.btn_process = ttk.Button(row, text="Process", command=self._on_process)
-        self.btn_process.pack(side="right", padx=2)
-        self.btn_download = ttk.Button(row, text="Download", command=self._on_download)
-        self.btn_download.pack(side="right", padx=2)
-        self.btn_sync = ttk.Button(row, text="Sync", command=self._on_sync)
-        self.btn_sync.pack(side="right", padx=2)
+
+        cqc_row = ttk.Frame(self.status_frame)
+        cqc_row.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(cqc_row, text="CQC:").pack(side="left", padx=(0, 8))
+        self.btn_sync = ttk.Button(cqc_row, text="Sync", command=self._on_sync)
+        self.btn_sync.pack(side="left", padx=2)
+        self.btn_download = ttk.Button(cqc_row, text="Download", command=self._on_download)
+        self.btn_download.pack(side="left", padx=2)
+        self.btn_process = ttk.Button(cqc_row, text="Process", command=self._on_process)
+        self.btn_process.pack(side="left", padx=2)
+
+        hsca_row = ttk.Frame(self.status_frame)
+        hsca_row.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(hsca_row, text="HSCA:").pack(side="left", padx=(0, 8))
+        self.btn_hsca_sync = ttk.Button(
+            hsca_row, text="Sync", command=self._on_hsca_sync
+        )
+        self.btn_hsca_sync.pack(side="left", padx=2)
+        self.btn_hsca_download = ttk.Button(
+            hsca_row, text="Download", command=self._on_hsca_download
+        )
+        self.btn_hsca_download.pack(side="left", padx=2)
+        self.btn_hsca_process = ttk.Button(
+            hsca_row, text="Process", command=self._on_hsca_process
+        )
+        self.btn_hsca_process.pack(side="left", padx=2)
 
         # Sub-tabs (Locations / Providers)
         subtab_row = ttk.Frame(self.frame)
@@ -617,8 +637,16 @@ class CQCPane(_PaneBase):
         self._cols_spec = cols_spec
 
     def action_buttons(self) -> list[ttk.Widget]:
-        return [self.btn_sync, self.btn_download, self.btn_process,
-                self.btn_search, self.btn_export]
+        return [
+            self.btn_sync,
+            self.btn_download,
+            self.btn_process,
+            self.btn_hsca_sync,
+            self.btn_hsca_download,
+            self.btn_hsca_process,
+            self.btn_search,
+            self.btn_export,
+        ]
 
     def _on_subtab_change(self) -> None:
         self.sub_view = self.subtab_var.get()
@@ -817,19 +845,62 @@ class CQCPane(_PaneBase):
             label="CQC processing...",
         )
 
+    def _on_hsca_sync(self) -> None:
+        self.app._dispatch_with_sanity(
+            lambda force: self.ch.cqc_hsca_sync(
+                progress_callback=self.app._progress_cb, force=force
+            ),
+            success_msg=lambda n: f"HSCA sync complete: {n:,} locations",
+            label="HSCA syncing...",
+        )
+
+    def _on_hsca_download(self) -> None:
+        def worker() -> None:
+            try:
+                p = self.ch.download_hsca(progress_callback=self.app._progress_cb)
+                self.app._progress_cb(f"HSCA download complete: {p.name}")
+            except Exception as exc:
+                logger.exception("HSCA download failed")
+                self.app._set_task_error(f"HSCA download failed: {exc}")
+            finally:
+                self.app._task_done()
+
+        self.app._run_task(worker, "HSCA downloading...")
+
+    def _on_hsca_process(self) -> None:
+        self.app._dispatch_with_sanity(
+            lambda force: self.ch.process_hsca(
+                progress_callback=self.app._progress_cb, force=force
+            ),
+            success_msg=lambda n: f"HSCA process complete: {n:,} locations",
+            label="HSCA processing...",
+        )
+
     def refresh(self) -> None:
         import duckdb
         try:
             con = duckdb.connect(str(self.ch.db_path), read_only=True)
-            loc = con.execute("SELECT COUNT(*) FROM cqc_locations").fetchone()[0]
-            active = con.execute("SELECT COUNT(*) FROM cqc_locations WHERE is_active = TRUE").fetchone()[0]
-            prov = con.execute("SELECT COUNT(*) FROM cqc_providers").fetchone()[0]
-            con.close()
+            try:
+                loc = con.execute("SELECT COUNT(*) FROM cqc_locations").fetchone()[0]
+                active = con.execute(
+                    "SELECT COUNT(*) FROM cqc_locations WHERE is_active = TRUE"
+                ).fetchone()[0]
+                prov = con.execute("SELECT COUNT(*) FROM cqc_providers").fetchone()[0]
+                try:
+                    hsca_count = con.execute(
+                        "SELECT COUNT(*) FROM cqc_hsca_locations"
+                    ).fetchone()[0]
+                except duckdb.CatalogException:
+                    hsca_count = 0
+            finally:
+                con.close()
             self.status_indicator.configure(
                 text=f"● Ready ({loc:,} locations / {prov:,} providers)",
                 foreground="green",
             )
-            self.status_detail.configure(text=f"{active:,} active")
+            self.status_detail.configure(
+                text=f"{active:,} active | HSCA locations: {hsca_count:,}"
+            )
         except Exception:
             self.status_indicator.configure(text="● Not Setup", foreground="red")
             self.status_detail.configure(text="Click Sync")

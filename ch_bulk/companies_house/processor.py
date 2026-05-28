@@ -640,18 +640,33 @@ def compact_database(
     if tmp_db.exists():
         tmp_db.unlink()
 
-    src = _escape_path(db_path)
-    dst = _escape_path(tmp_db)
+    # EXPORT/IMPORT instead of COPY FROM DATABASE: the latter copies tables
+    # in declaration order, so FK-bearing child tables get inserted before
+    # their parents and crash with spurious "key does not exist" errors
+    # even when the source DB is internally consistent. EXPORT writes a
+    # manifest in dependency order; IMPORT replays it so FK constraints
+    # are satisfied at each INSERT.
+    bundle_dir = db_path.parent / (db_path.name + ".compact.bundle.tmp")
+    if bundle_dir.exists():
+        import shutil
+        shutil.rmtree(bundle_dir)
 
-    con = duckdb.connect()
+    export_con = duckdb.connect(str(db_path), read_only=True)
     try:
-        con.execute(f"ATTACH '{src}' AS src (READ_ONLY)")
-        con.execute(f"ATTACH '{dst}' AS dst")
-        con.execute("COPY FROM DATABASE src TO dst")
-        con.execute("DETACH src")
-        con.execute("DETACH dst")
+        export_con.execute(
+            f"EXPORT DATABASE '{bundle_dir}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
     finally:
-        con.close()
+        export_con.close()
+
+    import_con = duckdb.connect(str(tmp_db))
+    try:
+        import_con.execute(f"IMPORT DATABASE '{bundle_dir}'")
+    finally:
+        import_con.close()
+
+    import shutil
+    shutil.rmtree(bundle_dir)
 
     db_path.unlink()
     tmp_db.rename(db_path)

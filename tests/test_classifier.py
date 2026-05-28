@@ -271,27 +271,39 @@ class WebsiteClassifierTests(unittest.TestCase):
             ]
         }
 
+        class DummySession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
         with patch("ch_bulk.web.classifier.requests.Session.get", side_effect=fake_get):
             with patch(
                 "ch_bulk.web.classifier.browser.is_playwright_available",
                 return_value=True,
             ):
                 with patch(
-                    "ch_bulk.web.classifier.browser.fetch_rendered",
-                    return_value=rich_html,
-                ):
+                    "ch_bulk.web.classifier.browser.PlaywrightSession",
+                    return_value=DummySession(),
+                ) as session_ctor:
                     with patch(
-                        "ch_bulk.web.classifier.httpx.Client.post",
-                        return_value=DummyLLMResponse(llm_payload),
+                        "ch_bulk.web.classifier.browser.fetch_rendered",
+                        return_value=rich_html,
                     ):
-                        summary = WebsiteClassifier(tmpdir.name, db_path).classify(
-                            mode="list",
-                            ids=["12345678"],
-                            batch_size=1,
-                        )
+                        with patch(
+                            "ch_bulk.web.classifier.httpx.Client.post",
+                            return_value=DummyLLMResponse(llm_payload),
+                        ):
+                            summary = WebsiteClassifier(tmpdir.name, db_path).classify(
+                                mode="list",
+                                ids=["12345678"],
+                                batch_size=1,
+                            )
 
         self.assertEqual(summary["records_updated"], 1)
         self.assertEqual(summary["unable_count"], 0)
+        self.assertEqual(session_ctor.call_count, 1)
         log_text = Path(str(summary["log_path"])).read_text(encoding="utf-8")
         self.assertIn("used_playwright=true", log_text)
 

@@ -546,49 +546,90 @@ class WebsiteClassifier:
 
                 def fallback_worker() -> None:
                     assert fallback_writer is not None
+                    session_cm: browser.PlaywrightSession | None = None
+                    session: browser.PlaywrightSession | None = None
+                    session_error: Exception | None = None
+                    session_error_logged = False
+
+                    def fallback_failure(
+                        task: FallbackTask,
+                        exc: Exception,
+                        *,
+                        include_traceback: bool,
+                    ) -> tuple[StagedClassification, dict[str, object]]:
+                        if include_traceback:
+                            logger.error(
+                                "Playwright fallback failed for %s",
+                                task.company_number,
+                                exc_info=(type(exc), exc, exc.__traceback__),
+                            )
+                        else:
+                            logger.error(
+                                "Playwright fallback unavailable for %s: %s",
+                                task.company_number,
+                                exc,
+                            )
+                        fallback_site = SiteContent(
+                            source_url=task.site.source_url,
+                            pages=[],
+                            content="",
+                            truncated=False,
+                            used_playwright=True,
+                            failure_reason="no_content",
+                            http_status=None,
+                            retry_pages=(),
+                        )
+                        staged_row = _unable_row(
+                            company_number=task.company_number,
+                            site=fallback_site,
+                            classifier_name=self.classifier_name,
+                            failure_reason="parse_error",
+                            error=str(exc),
+                        )
+                        metrics = {
+                            "n_pages": 0,
+                            "text_len": 0,
+                            "verdict": "Unable to classify",
+                            "used_playwright": True,
+                            "fetch_latency": task.fetch_latency,
+                            "llm_latency": 0.0,
+                        }
+                        return staged_row, metrics
+
                     try:
-                        with browser.PlaywrightSession() as session:
+                        try:
                             while True:
                                 task = fallback_queue.get()
                                 if task is None:
                                     fallback_queue.task_done()
                                     break
                                 started_company = time.monotonic()
-                                try:
-                                    staged_row, metrics = self._classify_company_with_playwright(
+                                if session is None and session_error is None:
+                                    try:
+                                        session_cm = browser.PlaywrightSession()
+                                        session = session_cm.__enter__()
+                                    except Exception as exc:
+                                        session_error = exc
+                                if session_error is not None:
+                                    staged_row, metrics = fallback_failure(
                                         task,
-                                        session,
+                                        session_error,
+                                        include_traceback=not session_error_logged,
                                     )
-                                except Exception as exc:
-                                    logger.exception(
-                                        "Playwright fallback failed for %s",
-                                        task.company_number,
-                                    )
-                                    fallback_site = SiteContent(
-                                        source_url=task.site.source_url,
-                                        pages=[],
-                                        content="",
-                                        truncated=False,
-                                        used_playwright=True,
-                                        failure_reason="no_content",
-                                        http_status=None,
-                                        retry_pages=(),
-                                    )
-                                    staged_row = _unable_row(
-                                        company_number=task.company_number,
-                                        site=fallback_site,
-                                        classifier_name=self.classifier_name,
-                                        failure_reason="parse_error",
-                                        error=str(exc),
-                                    )
-                                    metrics = {
-                                        "n_pages": 0,
-                                        "text_len": 0,
-                                        "verdict": "Unable to classify",
-                                        "used_playwright": True,
-                                        "fetch_latency": task.fetch_latency,
-                                        "llm_latency": 0.0,
-                                    }
+                                    session_error_logged = True
+                                else:
+                                    assert session is not None
+                                    try:
+                                        staged_row, metrics = self._classify_company_with_playwright(
+                                            task,
+                                            session,
+                                        )
+                                    except Exception as exc:
+                                        staged_row, metrics = fallback_failure(
+                                            task,
+                                            exc,
+                                            include_traceback=True,
+                                        )
                                 with fallback_writer_lock:
                                     fallback_writer.append(staged_row)
                                     ready_path = None
@@ -609,6 +650,9 @@ class WebsiteClassifier:
                                     log_line(f"chunk lane=fallback path={ready_path.name}")
                                     load_requested.set()
                                 fallback_queue.task_done()
+                        finally:
+                            if session_cm is not None:
+                                session_cm.__exit__(None, None, None)
                     except BaseException as exc:
                         fallback_failures.append(exc)
                         stop_event.set()

@@ -20,10 +20,14 @@ app = typer.Typer(
 )
 console = Console()
 cqc_enrich_app = typer.Typer(help="CQC API enrichment commands.")
+cqc_bulk_app = typer.Typer(help="CQC bulk directory commands.")
 ch_enrich_app = typer.Typer(help="Companies House enrichment commands.")
+hsca_bulk_app = typer.Typer(help="HSCA active locations bulk commands.")
 migration_app = typer.Typer(help="Migration bundle commands.")
 app.add_typer(cqc_enrich_app, name="cqc-enrich")
+app.add_typer(cqc_bulk_app, name="cqc-bulk")
 app.add_typer(ch_enrich_app, name="ch-enrich")
+app.add_typer(hsca_bulk_app, name="hsca-bulk")
 app.add_typer(migration_app, name="migration")
 
 # Set up basic logging so library messages are visible
@@ -170,6 +174,112 @@ def sync(
     ch = ChBulk(data_dir=data_dir, db_path=db_path)
     row_count = ch.sync(month=month, keep_zips=keep_zips)
     console.print(f"[bold green]Synced {row_count:,} companies.[/]")
+
+
+@cqc_bulk_app.command("download")
+def cqc_bulk_download(
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
+    ),
+) -> None:
+    """Download the latest CQC care directory CSV."""
+    ch = ChBulk(data_dir=data_dir)
+    output_path = ch.download_cqc()
+    console.print(f"[bold green]CQC directory downloaded:[/] {output_path}")
+
+
+@cqc_bulk_app.command("process")
+def cqc_bulk_process(
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
+    ),
+    db_path: Optional[Path] = typer.Option(
+        None, "--db-path", help=DATA_DIR_DB_PATH_HELP, show_default=False
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Proceed even if sanity checks fail."
+    ),
+) -> None:
+    """Process the latest downloaded CQC directory CSV into DuckDB."""
+    ch = ChBulk(data_dir=data_dir, db_path=db_path)
+    row_count = ch.process_cqc(force=force)
+    console.print(f"[bold green]CQC processed:[/] {row_count:,} locations")
+
+
+@cqc_bulk_app.command("sync")
+def cqc_bulk_sync(
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
+    ),
+    db_path: Optional[Path] = typer.Option(
+        None, "--db-path", help=DATA_DIR_DB_PATH_HELP, show_default=False
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Proceed even if sanity checks fail."
+    ),
+) -> None:
+    """Download and process the latest CQC directory in one step."""
+    ch = ChBulk(data_dir=data_dir, db_path=db_path)
+    row_count = ch.sync_cqc(force=force)
+    console.print(f"[bold green]CQC synced:[/] {row_count:,} locations")
+
+
+@hsca_bulk_app.command("download")
+def hsca_bulk_download(
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
+    ),
+    target_date: Optional[str] = typer.Option(
+        None,
+        "--target-date",
+        help="Date string for ODS filename selection.",
+    ),
+) -> None:
+    """Download the latest HSCA active locations ODS."""
+    ch = ChBulk(data_dir=data_dir)
+    output_path = ch.download_hsca(target_date=target_date)
+    console.print(f"[bold green]HSCA downloaded:[/] {output_path}")
+
+
+@hsca_bulk_app.command("process")
+def hsca_bulk_process(
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
+    ),
+    db_path: Optional[Path] = typer.Option(
+        None, "--db-path", help=DATA_DIR_DB_PATH_HELP, show_default=False
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Proceed even if sanity checks fail."
+    ),
+) -> None:
+    """Process the latest downloaded HSCA ODS into DuckDB."""
+    ch = ChBulk(data_dir=data_dir, db_path=db_path)
+    row_count = ch.process_hsca(force=force)
+    console.print(f"[bold green]HSCA processed:[/] {row_count:,} locations")
+
+
+@hsca_bulk_app.command("sync")
+def hsca_bulk_sync(
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory for downloads."
+    ),
+    db_path: Optional[Path] = typer.Option(
+        None, "--db-path", help=DATA_DIR_DB_PATH_HELP, show_default=False
+    ),
+    target_date: Optional[str] = typer.Option(
+        None,
+        "--target-date",
+        help="Date string for ODS filename selection.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Proceed even if sanity checks fail."
+    ),
+) -> None:
+    """Download and process the latest HSCA ODS in one step."""
+    ch = ChBulk(data_dir=data_dir, db_path=db_path)
+    row_count = ch.cqc_hsca_sync(target_date=target_date, force=force)
+    console.print(f"[bold green]HSCA synced:[/] {row_count:,} locations")
 
 
 @app.command("match")
