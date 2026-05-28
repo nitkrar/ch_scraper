@@ -30,7 +30,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from ch_bulk.api import ChBulk
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
 from ch_bulk.companies_house.processor import SanityCheckError
 
 logger = logging.getLogger(__name__)
@@ -949,8 +949,8 @@ class ChBulkApp:
         db_path: str | Path | None = None,
         data_dir: str | Path | None = None,
     ) -> None:
-        resolved_db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
         resolved_data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+        resolved_db_path = Path(db_path) if db_path is not None else default_db_path(resolved_data_dir)
         self.ch = ChBulk(data_dir=resolved_data_dir, db_path=resolved_db_path)
         self._task_running = False
         self._task_message = ""
@@ -1160,8 +1160,8 @@ def main(
     data_dir: str | Path | None = None,
 ) -> None:
     """Launch the Tkinter GUI."""
-    resolved_db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     resolved_data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+    resolved_db_path = Path(db_path) if db_path is not None else default_db_path(resolved_data_dir)
     app = ChBulkApp(db_path=resolved_db_path, data_dir=resolved_data_dir)
     app.run()
 

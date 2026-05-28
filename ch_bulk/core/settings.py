@@ -33,9 +33,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from ch_bulk.core.paths import settings_path as _settings_path
 
-SETTINGS_FILENAME = "settings.json"
+logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "api_keys": {
@@ -56,7 +56,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 
 def settings_path(data_dir: str | Path) -> Path:
-    return Path(data_dir) / SETTINGS_FILENAME
+    return _settings_path(data_dir)
 
 
 def load_settings(data_dir: str | Path) -> dict[str, Any]:

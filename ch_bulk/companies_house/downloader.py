@@ -17,6 +17,8 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
+from ch_bulk.core.paths import ch_input_dir
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://download.companieshouse.gov.uk"
@@ -244,7 +246,8 @@ def download_bulk_data(
         zipfile.BadZipFile: If ``strict=True`` and a ZIP is corrupt.
     """
     data_dir = Path(data_dir)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = ch_input_dir(data_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     if month is None:
         if progress_callback:
@@ -265,7 +268,7 @@ def download_bulk_data(
             for part in range(1, PARTS + 1):
                 filename = _zip_filename(month, part)
                 url = f"{BASE_URL}/{filename}"
-                dest = data_dir / filename
+                dest = target_dir / filename
 
                 progress_callback(f"Downloading part {part}/{PARTS}: {filename}")
 
@@ -299,7 +302,7 @@ def download_bulk_data(
                 for part in range(1, PARTS + 1):
                     filename = _zip_filename(month, part)
                     url = f"{BASE_URL}/{filename}"
-                    dest = data_dir / filename
+                    dest = target_dir / filename
 
                     last_exc = None
                     for attempt in range(1, _MAX_DOWNLOAD_RETRIES + 1):
@@ -330,7 +333,7 @@ def download_bulk_data(
         progress_callback("Extracting ZIP files...")
     logger.info("Extracting ZIP files...")
     for zip_path in zip_paths:
-        csv_files = _extract_zip(zip_path, data_dir)
+        csv_files = _extract_zip(zip_path, target_dir)
         if not csv_files and strict:
             raise zipfile.BadZipFile(
                 f"Corrupt or empty ZIP file: {zip_path.name}. "

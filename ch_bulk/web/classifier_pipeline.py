@@ -16,7 +16,7 @@ from requests.adapters import HTTPAdapter
 
 from ch_bulk.web import browser
 from ch_bulk.core.logging import FsyncLineLogger
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
 from ch_bulk.core.settings import load_settings
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.db.staging import with_duckdb_connection
@@ -87,7 +87,7 @@ class WebsiteClassifier:
         db_path: str | Path | None = None,
     ) -> None:
         self.data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
-        self.db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+        self.db_path = Path(db_path) if db_path is not None else default_db_path(self.data_dir)
         settings = load_settings(self.data_dir)
         self.llm_config = dict(settings.get("llm", {}))
         self.model = str(self.llm_config.get("model") or "unknown-model")

@@ -6,7 +6,41 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SQL_DIR = REPO_ROOT / "ch_bulk" / "db" / "sql"
 DEFAULT_DATA_DIR = REPO_ROOT / "data"
 DATA_REFERENCE_DIR = DEFAULT_DATA_DIR / "reference"
-DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "db" / "ch_bulk.duckdb"
+
+
+def input_dir(data_dir: Path | str, source: str) -> Path:
+    return Path(data_dir) / "input" / source
+
+
+def ch_input_dir(data_dir: Path | str) -> Path:
+    return input_dir(data_dir, "ch")
+
+
+def cqc_input_dir(data_dir: Path | str) -> Path:
+    return input_dir(data_dir, "cqc")
+
+
+def settings_path(data_dir: Path | str) -> Path:
+    return Path(data_dir) / "settings.json"
+
+
+def reference_dir(data_dir: Path | str) -> Path:
+    return Path(data_dir) / "reference"
+
+
+def revenue_bands_path(data_dir: Path | str) -> Path:
+    return reference_dir(data_dir) / "revenue_bands.csv"
+
+
+def db_dir(data_dir: Path | str) -> Path:
+    return Path(data_dir) / "db"
+
+
+def default_db_path(data_dir: Path | str) -> Path:
+    return db_dir(data_dir) / "ch_bulk.duckdb"
+
+
+DEFAULT_DB_PATH = default_db_path(DEFAULT_DATA_DIR)
 
 
 def logs_dir(data_dir: Path | str) -> Path:

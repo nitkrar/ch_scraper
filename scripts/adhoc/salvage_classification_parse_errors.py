@@ -17,7 +17,7 @@ from ch_bulk.web.classifier import (
     insert_classification_batch,
     load_classification_staging,
 )
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
 from ch_bulk.db.staging import with_duckdb_connection
 
 RECOVERY_CLASSIFIER = "repair:parse_error_salvage"
@@ -194,7 +194,7 @@ def main() -> int:
     )
     parser.add_argument("--batch-id", required=True)
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR))
-    parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
+    parser.add_argument("--db-path", default=str(default_db_path(DEFAULT_DATA_DIR)))
     parser.add_argument("--sample-limit", type=int, default=5)
     parser.add_argument(
         "--apply",

@@ -21,6 +21,8 @@ from typing import Pattern
 
 import httpx
 
+from ch_bulk.core.paths import cqc_input_dir
+
 logger = logging.getLogger(__name__)
 
 CQC_LISTING_URL = "https://www.cqc.org.uk/about-us/transparency/using-cqc-data"
@@ -163,8 +165,7 @@ def download_cqc_directory(
 
     Returns the path to the downloaded file.
     """
-    data_dir = Path(data_dir)
-    target_dir = data_dir / "input" / "cqc"
+    target_dir = cqc_input_dir(data_dir)
 
     def _lookup() -> tuple[str, date]:
         if progress_callback:
@@ -189,8 +190,7 @@ def download_hsca_filters(
     If ``target_date`` is supplied, fetch that exact published date from
     the listing page instead of the latest one.
     """
-    data_dir = Path(data_dir)
-    target_dir = data_dir / "input" / "cqc"
+    target_dir = cqc_input_dir(data_dir)
 
     def _lookup() -> tuple[str, date]:
         if progress_callback:

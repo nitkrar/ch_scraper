@@ -12,7 +12,7 @@ import httpx
 
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
-from ch_bulk.core.paths import DATA_REFERENCE_DIR, DEFAULT_DATA_DIR
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, revenue_bands_path
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
 from ch_bulk.companies_house.revenue_model import estimate, load_bands
 from ch_bulk.core.settings import load_settings
@@ -965,9 +965,8 @@ def enrich_revenue(
     company_numbers: list[str] | None = None,
 ) -> dict[str, int]:
     data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
-    del data_dir
     db_path = Path(db_path)
-    bands_path = DATA_REFERENCE_DIR / "revenue_bands.csv"
+    bands_path = revenue_bands_path(data_dir)
     bands = load_bands(bands_path)
 
     con = duckdb.connect(str(db_path))

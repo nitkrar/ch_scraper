@@ -10,10 +10,88 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk.core.paths import DATA_REFERENCE_DIR, run_stage_file
+from ch_bulk.core.paths import DATA_REFERENCE_DIR, revenue_bands_path, run_stage_file
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.companies_house.ch_enricher import compute_age_fields, enrich_directors, enrich_revenue
 from ch_bulk.companies_house.revenue_model import estimate, load_bands
+
+
+def _seed_revenue_test_db(db_path: Path) -> None:
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(
+            """
+            CREATE TABLE companies (
+                company_number TEXT PRIMARY KEY,
+                company_name TEXT,
+                postcode TEXT,
+                address_post_town TEXT,
+                sic_code_1 TEXT,
+                sic_code_2 TEXT,
+                sic_code_3 TEXT,
+                sic_code_4 TEXT
+            )
+            """
+        )
+        ensure_pipeline_schema(con)
+        con.execute(
+            """
+            INSERT INTO companies VALUES
+                ('11111111', 'Alpha', 'SW1A 1AA', 'London', '88100', NULL, NULL, NULL),
+                ('22222222', 'Beta', 'SW1A 1AA', 'London', '88100', NULL, NULL, NULL)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO company_enrichment (
+                company_number,
+                avg_director_age,
+                min_director_age,
+                max_director_age,
+                directors_over_60,
+                all_directors_60_plus,
+                directors_dob_years,
+                revenue,
+                revenue_source,
+                employee_count,
+                filing_period_start,
+                filing_period_end,
+                gross_profit,
+                profit_before_tax,
+                profit_after_tax,
+                fixed_assets,
+                current_assets,
+                total_assets,
+                net_assets,
+                net_current_assets,
+                filing_id,
+                filing_format,
+                filing_age_months,
+                last_enriched_at
+            )
+            VALUES
+                (
+                    '11111111',
+                    NULL, NULL, NULL, 0, FALSE, CAST('[]' AS JSON),
+                    NULL, NULL, 75,
+                    DATE '2025-01-01', DATE '2025-12-31',
+                    800000, 250000, 200000, 3200000, 1800000, 5000000, 2500000, 750000,
+                    'file-11111111', 'ixbrl', 6,
+                    TIMESTAMP '2026-05-24 12:00:00'
+                ),
+                (
+                    '22222222',
+                    NULL, NULL, NULL, 0, FALSE, CAST('[]' AS JSON),
+                    NULL, NULL, NULL,
+                    NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL,
+                    TIMESTAMP '2026-05-24 12:00:00'
+                )
+            """
+        )
+    finally:
+        con.close()
 
 
 class AgeFieldTests(unittest.TestCase):
@@ -71,81 +149,7 @@ class RevenueModelTests(unittest.TestCase):
     def test_enrich_revenue_uses_employee_count_and_preserves_nulls(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "revenue.duckdb"
-            con = duckdb.connect(str(db_path))
-            try:
-                con.execute(
-                    """
-                    CREATE TABLE companies (
-                        company_number TEXT PRIMARY KEY,
-                        company_name TEXT,
-                        postcode TEXT,
-                        address_post_town TEXT,
-                        sic_code_1 TEXT,
-                        sic_code_2 TEXT,
-                        sic_code_3 TEXT,
-                        sic_code_4 TEXT
-                    )
-                    """
-                )
-                ensure_pipeline_schema(con)
-                con.execute(
-                    """
-                    INSERT INTO companies VALUES
-                        ('11111111', 'Alpha', 'SW1A 1AA', 'London', '88100', NULL, NULL, NULL),
-                        ('22222222', 'Beta', 'SW1A 1AA', 'London', '88100', NULL, NULL, NULL)
-                    """
-                )
-                con.execute(
-                    """
-                    INSERT INTO company_enrichment (
-                        company_number,
-                        avg_director_age,
-                        min_director_age,
-                        max_director_age,
-                        directors_over_60,
-                        all_directors_60_plus,
-                        directors_dob_years,
-                        revenue,
-                        revenue_source,
-                        employee_count,
-                        filing_period_start,
-                        filing_period_end,
-                        gross_profit,
-                        profit_before_tax,
-                        profit_after_tax,
-                        fixed_assets,
-                        current_assets,
-                        total_assets,
-                        net_assets,
-                        net_current_assets,
-                        filing_id,
-                        filing_format,
-                        filing_age_months,
-                        last_enriched_at
-                    )
-                    VALUES
-                        (
-                            '11111111',
-                            NULL, NULL, NULL, 0, FALSE, CAST('[]' AS JSON),
-                            NULL, NULL, 75,
-                            DATE '2025-01-01', DATE '2025-12-31',
-                            800000, 250000, 200000, 3200000, 1800000, 5000000, 2500000, 750000,
-                            'file-11111111', 'ixbrl', 6,
-                            TIMESTAMP '2026-05-24 12:00:00'
-                        ),
-                        (
-                            '22222222',
-                            NULL, NULL, NULL, 0, FALSE, CAST('[]' AS JSON),
-                            NULL, NULL, NULL,
-                            NULL, NULL,
-                            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                            NULL, NULL, NULL,
-                            TIMESTAMP '2026-05-24 12:00:00'
-                        )
-                    """
-                )
-            finally:
-                con.close()
+            _seed_revenue_test_db(db_path)
 
             summary = enrich_revenue(db_path)
             self.assertEqual(summary["estimated"], 1)
@@ -215,6 +219,47 @@ class RevenueModelTests(unittest.TestCase):
                             None,
                             None,
                         ),
+                    ],
+                )
+            finally:
+                con.close()
+
+    def test_enrich_revenue_honors_custom_data_dir_reference_tree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            db_path = tmp_path / "revenue.duckdb"
+            data_dir = tmp_path / "custom_data"
+            bands_path = revenue_bands_path(data_dir)
+            bands_path.parent.mkdir(parents=True, exist_ok=True)
+            bands_path.write_text(
+                (
+                    "min_employees,max_employees,low_gbp,high_gbp,midpoint_gbp\n"
+                    "1,49,50000,200000,125000\n"
+                    "50,99,900000,1100000,1000000\n"
+                    "100,,2000000,4000000,3000000\n"
+                ),
+                encoding="utf-8",
+            )
+            _seed_revenue_test_db(db_path)
+
+            summary = enrich_revenue(db_path, data_dir=data_dir)
+            self.assertEqual(summary["estimated"], 1)
+            self.assertEqual(summary["skipped"], 1)
+
+            con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                rows = con.execute(
+                    """
+                    SELECT company_number, revenue, revenue_source
+                    FROM company_enrichment
+                    ORDER BY company_number
+                    """
+                ).fetchall()
+                self.assertEqual(
+                    rows,
+                    [
+                        ("11111111", 1000000.0, "employee_band_lookup"),
+                        ("22222222", None, None),
                     ],
                 )
             finally:

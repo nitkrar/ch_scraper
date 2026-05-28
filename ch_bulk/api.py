@@ -16,7 +16,13 @@ from ch_bulk.companies_house.ch_enricher import enrich_directors as _enrich_dire
 from ch_bulk.companies_house.ch_enricher import load_director_staging as _load_director_staging
 from ch_bulk.web.classifier import WebsiteClassifier, load_classification_staging as _load_classification_staging
 from ch_bulk.companies_house.ch_enricher import enrich_revenue as _enrich_revenue
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.core.paths import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_DB_PATH,
+    ch_input_dir,
+    cqc_input_dir,
+    default_db_path,
+)
 from ch_bulk.companies_house.financials_enricher import enrich_financials as _enrich_financials
 from ch_bulk.companies_house.financials_enricher import load_financials_staging as _load_financials_staging
 from ch_bulk.cqc.downloader import download_cqc_directory, download_hsca_filters
@@ -99,18 +105,18 @@ class ChBulk:
         db_path: str | Path | None = None,
     ) -> None:
         self.data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
-        self.db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+        self.db_path = Path(db_path) if db_path is not None else default_db_path(self.data_dir)
         setup_logging(self.data_dir)
 
     @property
     def ch_dir(self) -> Path:
         """Where CH BasicCompanyData CSVs live."""
-        return self.data_dir / "input" / "ch"
+        return ch_input_dir(self.data_dir)
 
     @property
     def cqc_dir(self) -> Path:
         """Where CQC bulk files will live (when CQC support lands)."""
-        return self.data_dir / "input" / "cqc"
+        return cqc_input_dir(self.data_dir)
 
     def download(
         self,

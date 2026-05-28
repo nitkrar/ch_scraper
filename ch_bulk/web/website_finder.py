@@ -13,7 +13,7 @@ import duckdb
 
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
 from ch_bulk.db.staging import (
     LoadedBatch,
     StagingWriter,
@@ -450,7 +450,7 @@ class WebsiteFinder:
         min_score: int = DEFAULT_MIN_SCORE,
     ) -> None:
         self.data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
-        self.db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+        self.db_path = Path(db_path) if db_path is not None else default_db_path(self.data_dir)
         self.min_score = int(min_score)
         self.searcher = DuckDuckGoSearcher()
 
