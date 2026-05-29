@@ -86,6 +86,31 @@ CQC_PROVIDER_COLUMNS = [
     ("is_active", "In Scrape", 70),
 ]
 
+HSCA_LOCATION_COLUMNS = [
+    ("location_id", "Location ID", 100),
+    ("name", "Location Name", 220),
+    ("provider_name", "Provider", 200),
+    ("company_name", "Company", 180),
+    ("company_status", "Co Status", 90),
+    ("provider_companies_house_number", "CH No", 90),
+    ("number_of_beds", "Beds", 70),
+    ("care_home", "Care Home", 80),
+    ("dormant", "Dormant", 70),
+    ("provider_ownership_type", "Ownership", 110),
+    ("provider_brand_name", "Brand", 140),
+    ("st_domiciliary_care_service", "Domiciliary", 90),
+    ("st_supported_living_service", "Supported", 90),
+    ("st_care_home_with_nursing", "CH Nursing", 95),
+    ("st_care_home_without_nursing", "CH No Nurs", 100),
+    ("st_extra_care_housing_services", "Extra Care", 90),
+    ("st_hospice_services_at_home", "Hospice Home", 100),
+    ("postcode", "Postcode", 80),
+    ("region", "Region", 110),
+    ("local_authority", "Local Authority", 150),
+    ("service_types", "Service Types", 180),
+    ("is_active", "In Scrape", 70),
+]
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Shared helpers
@@ -542,11 +567,12 @@ class CQCPane(_PaneBase):
 
     def __init__(self, parent: ttk.Frame, app: "ChBulkApp"):
         super().__init__(parent, app)
-        self.sub_view = "Locations"  # or "Providers"
+        self.sub_view = "Locations"
         self.page = 1
         self.total_pages = 1
         self.sort_by_loc = "name"
         self.sort_by_prov = "provider_name"
+        self.sort_by_hsca = "name"
         self.sort_order = "ASC"
         self._build()
         self.refresh()
@@ -596,15 +622,11 @@ class CQCPane(_PaneBase):
         )
         self.btn_hsca_process.pack(side="left", padx=2)
 
-        # Sub-tabs (Locations / Providers)
-        subtab_row = ttk.Frame(self.frame)
-        subtab_row.pack(fill="x", padx=10, pady=(8, 0))
-        self.subtab_var = tk.StringVar(value="Locations")
-        for name in ("Locations", "Providers"):
-            ttk.Radiobutton(
-                subtab_row, text=name, variable=self.subtab_var, value=name,
-                command=self._on_subtab_change,
-            ).pack(side="left", padx=4)
+        # Sub-tabs (Locations / Providers / HSCA)
+        self.subtabs = ttk.Notebook(self.frame)
+        self.subtabs.pack(fill="x", padx=10, pady=(8, 0))
+        for name in ("Locations", "Providers", "HSCA"):
+            self.subtabs.add(ttk.Frame(self.subtabs), text=name)
 
         # Filters (shared between sub-views, with two location-only entries
         # that get disabled when Providers is selected)
@@ -670,6 +692,19 @@ class CQCPane(_PaneBase):
         self.min_locs_entry = ttk.Entry(f, textvariable=self.min_locs_var, width=8)
         self.min_locs_entry.grid(row=2, column=3, sticky="w", padx=4)
 
+        self.has_ch_label = ttk.Label(f, text="Has CH number:")
+        self.has_ch_label.grid(row=2, column=2, sticky="e", padx=4, pady=4)
+        self.has_ch_var = tk.StringVar(value="All")
+        self.has_ch_combo = ttk.Combobox(
+            f,
+            textvariable=self.has_ch_var,
+            state="readonly",
+            width=12,
+            values=["All", "Yes", "No"],
+        )
+        self.has_ch_combo.grid(row=2, column=3, sticky="w", padx=4)
+        self.has_ch_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_search())
+
         action_row = ttk.Frame(f)
         action_row.grid(row=3, column=0, columnspan=6, sticky="e", padx=4, pady=(6, 4))
         self.btn_search = ttk.Button(action_row, text="Search", command=self._on_search)
@@ -695,6 +730,7 @@ class CQCPane(_PaneBase):
         self.page_label.pack(side="left", padx=10)
         self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
         self.btn_next.pack(side="left")
+        self.subtabs.bind("<<NotebookTabChanged>>", self._on_subtab_change)
 
     def _build_results_tree(self) -> None:
         """Rebuild the treeview with the active sub-view's columns."""
@@ -704,7 +740,12 @@ class CQCPane(_PaneBase):
                 and any(isinstance(c, ttk.Treeview) for c in widget.winfo_children())
             ):
                 widget.destroy()
-        cols_spec = CQC_LOCATION_COLUMNS if self.sub_view == "Locations" else CQC_PROVIDER_COLUMNS
+        if self.sub_view == "Locations":
+            cols_spec = CQC_LOCATION_COLUMNS
+        elif self.sub_view == "Providers":
+            cols_spec = CQC_PROVIDER_COLUMNS
+        else:
+            cols_spec = HSCA_LOCATION_COLUMNS
         tree_frame = ttk.Frame(self.results_frame)
         tree_frame.pack(fill="both", expand=True)
         tree_frame.grid_rowconfigure(0, weight=1)
@@ -736,8 +777,9 @@ class CQCPane(_PaneBase):
             self.btn_export,
         ]
 
-    def _on_subtab_change(self) -> None:
-        self.sub_view = self.subtab_var.get()
+    def _on_subtab_change(self, event: tk.Event | None = None) -> None:
+        del event
+        self.sub_view = self.subtabs.tab(self.subtabs.select(), "text")
         # Show/hide location-only widgets (label + entry, both columns)
         if self.sub_view == "Locations":
             self.loc_name_label.grid();   self.loc_name_entry.grid()
@@ -746,7 +788,10 @@ class CQCPane(_PaneBase):
             self.min_locs_label.grid_remove()
             self.min_locs_entry.grid_remove()
             self.min_locs_var.set("")
-        else:  # Providers
+            self.has_ch_label.grid_remove()
+            self.has_ch_combo.grid_remove()
+            self.has_ch_var.set("All")
+        elif self.sub_view == "Providers":
             self.loc_name_label.grid_remove()
             self.loc_name_entry.grid_remove()
             self.postcode_label.grid_remove()
@@ -755,6 +800,17 @@ class CQCPane(_PaneBase):
             # Show provider-only
             self.min_locs_label.grid()
             self.min_locs_entry.grid()
+            self.has_ch_label.grid_remove()
+            self.has_ch_combo.grid_remove()
+            self.has_ch_var.set("All")
+        else:  # HSCA
+            self.loc_name_label.grid();   self.loc_name_entry.grid()
+            self.postcode_label.grid();   self.postcode_entry.grid()
+            self.min_locs_label.grid_remove()
+            self.min_locs_entry.grid_remove()
+            self.min_locs_var.set("")
+            self.has_ch_label.grid()
+            self.has_ch_combo.grid()
         # Rebuild the result tree with new columns, replace pagination row
         for widget in self.results_frame.winfo_children():
             widget.destroy()
@@ -795,7 +851,7 @@ class CQCPane(_PaneBase):
             if self.postcode_var.get().strip():
                 out["postcode_prefix"] = self.postcode_var.get().strip()
             out["sort_by"] = self.sort_by_loc
-        else:
+        elif self.sub_view == "Providers":
             # Providers-only: min active location count
             try:
                 min_v = int(self.min_locs_var.get())
@@ -803,6 +859,16 @@ class CQCPane(_PaneBase):
             except (TypeError, ValueError):
                 pass
             out["sort_by"] = self.sort_by_prov
+        else:
+            if self.loc_name_var.get().strip():
+                out["name_contains"] = self.loc_name_var.get().strip()
+            if self.postcode_var.get().strip():
+                out["postcode_prefix"] = self.postcode_var.get().strip()
+            if self.has_ch_var.get() == "Yes":
+                out["has_ch_number"] = True
+            elif self.has_ch_var.get() == "No":
+                out["has_ch_number"] = False
+            out["sort_by"] = self.sort_by_hsca
         out["sort_order"] = self.sort_order
         out["page"] = self.page
         out["page_size"] = PAGE_SIZE
@@ -816,6 +882,7 @@ class CQCPane(_PaneBase):
         self.region_var.set("")
         self.la_var.set("")
         self.min_locs_var.set("")
+        self.has_ch_var.set("All")
         self.active_var.set("Active only")
         self.page = 1
         self.tree.delete(*self.tree.get_children())
@@ -827,7 +894,12 @@ class CQCPane(_PaneBase):
         self._run_query()
 
     def _on_sort(self, col: str) -> None:
-        attr = "sort_by_loc" if self.sub_view == "Locations" else "sort_by_prov"
+        if self.sub_view == "Locations":
+            attr = "sort_by_loc"
+        elif self.sub_view == "Providers":
+            attr = "sort_by_prov"
+        else:
+            attr = "sort_by_hsca"
         if getattr(self, attr) == col and self.sort_order == "ASC":
             self.sort_order = "DESC"
         else:
@@ -854,8 +926,10 @@ class CQCPane(_PaneBase):
                 filters = self._get_filters()
                 if self.sub_view == "Locations":
                     rows, total = self.ch.query_cqc_locations_advanced(**filters)
-                else:
+                elif self.sub_view == "Providers":
                     rows, total = self.ch.query_cqc_providers_advanced(**filters)
+                else:
+                    rows, total = self.ch.query_hsca_locations_advanced(**filters)
                 self.app.root.after(0, lambda: self._display(rows, total))
             except FileNotFoundError:
                 self.app.root.after(0, lambda: self.app._set_status("No DB. Click Sync first."))
@@ -896,8 +970,10 @@ class CQCPane(_PaneBase):
             try:
                 if self.sub_view == "Locations":
                     n = self.ch.export_cqc_locations_csv(path, **filters)
-                else:
+                elif self.sub_view == "Providers":
                     n = self.ch.export_cqc_providers_csv(path, **filters)
+                else:
+                    n = self.ch.export_hsca_locations_csv(path, **filters)
                 self.app.root.after(0, lambda: self.app._set_status(f"Exported {n:,} rows to {path}"))
             except Exception as exc:
                 logger.exception("CQC export error")

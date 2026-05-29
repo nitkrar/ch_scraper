@@ -33,9 +33,11 @@ from ch_bulk.cqc.processor import process_cqc_csv, process_hsca_filters
 from ch_bulk.cqc.query import (
     export_cqc_locations_csv as _export_cqc_locations_csv,
     export_cqc_providers_csv as _export_cqc_providers_csv,
+    export_hsca_locations_csv as _export_hsca_locations_csv,
     get_cqc_filter_options as _get_cqc_filter_options,
     query_cqc_locations,
     query_cqc_providers,
+    query_hsca_locations,
 )
 from ch_bulk.companies_house.downloader import download_bulk_data
 from ch_bulk.matching.ch_cqc import match_companies_to_cqc
@@ -735,6 +737,10 @@ class ChBulk:
         """Multi-filter paginated query against cqc_providers."""
         return query_cqc_providers(self.db_path, **filters)
 
+    def query_hsca_locations_advanced(self, **filters) -> tuple[list[dict], int]:
+        """Multi-filter paginated query against joined HSCA locations."""
+        return query_hsca_locations(self.db_path, **filters)
+
     def get_cqc_filter_options(self) -> dict:
         """Distinct values for CQC filter dropdowns."""
         return _get_cqc_filter_options(self.db_path)
@@ -746,6 +752,10 @@ class ChBulk:
     def export_cqc_providers_csv(self, output_path, **filters) -> int:
         """Export filtered cqc_providers to CSV. Returns row count."""
         return _export_cqc_providers_csv(self.db_path, output_path, **filters)
+
+    def export_hsca_locations_csv(self, output_path, **filters) -> int:
+        """Export filtered joined HSCA locations to CSV. Returns row count."""
+        return _export_hsca_locations_csv(self.db_path, output_path, **filters)
 
     def export_filtered_csv(self, output_path, **filters) -> int:
         """Export filtered results to CSV via DuckDB COPY. Returns row count."""
