@@ -66,6 +66,45 @@ CH_COLUMNS = [
     ("is_active", "In Scrape", 70),
 ]
 
+DIRECTORS_COLUMNS = [
+    ("company_number", "Company No", 90),
+    ("company_name", "Company Name", 220),
+    ("provider_name", "Provider", 200),
+    ("company_status", "Status", 80),
+    ("avg_director_age", "Avg Age", 70),
+    ("min_director_age", "Min Age", 70),
+    ("max_director_age", "Max Age", 70),
+    ("directors_over_60", "Over 60", 70),
+    ("all_directors_60_plus", "All 60+", 70),
+    ("sic_code_1", "SIC 1", 60),
+    ("postcode", "Postcode", 80),
+    ("incorporation_date", "Inc. Date", 90),
+    ("is_active", "In Scrape", 70),
+]
+
+FINANCIALS_COLUMNS = [
+    ("company_number", "Company No", 90),
+    ("company_name", "Company Name", 220),
+    ("provider_name", "Provider", 200),
+    ("company_status", "Status", 80),
+    ("revenue", "Revenue", 100),
+    ("revenue_source", "Revenue Src", 120),
+    ("employee_count", "Employees", 80),
+    ("gross_profit", "Gross Profit", 100),
+    ("profit_before_tax", "PBT", 90),
+    ("profit_after_tax", "PAT", 90),
+    ("fixed_assets", "Fixed Assets", 100),
+    ("current_assets", "Current Assets", 110),
+    ("total_assets", "Total Assets", 100),
+    ("net_assets", "Net Assets", 100),
+    ("net_current_assets", "Net Curr Assets", 110),
+    ("filing_period_end", "Filing End", 90),
+    ("sic_code_1", "SIC 1", 60),
+    ("postcode", "Postcode", 80),
+    ("incorporation_date", "Inc. Date", 90),
+    ("is_active", "In Scrape", 70),
+]
+
 CQC_LOCATION_COLUMNS = [
     ("location_id", "Location ID", 100),
     ("name", "Location Name", 220),
@@ -270,10 +309,14 @@ class CHPane(_PaneBase):
 
     def __init__(self, parent: ttk.Frame, app: "ChBulkApp"):
         super().__init__(parent, app)
+        self.sub_view = "Companies"
         self.page = 1
         self.total_pages = 1
-        self.sort_by = "company_name"
+        self.sort_by_comp = "company_name"
+        self.sort_by_dir = "company_name"
+        self.sort_by_fin = "company_name"
         self.sort_order = "ASC"
+        self._cols_spec = CH_COLUMNS
         self._build()
         self.refresh()
 
@@ -302,70 +345,114 @@ class CHPane(_PaneBase):
         self.btn_sync = ttk.Button(row, text="Sync", command=self._on_sync)
         self.btn_sync.pack(side="right", padx=2)
 
+        self.subtabs = ttk.Notebook(self.frame)
+        self.subtabs.pack(fill="x", padx=10, pady=(8, 0))
+        for name in ("Companies", "Directors Age", "Financials"):
+            self.subtabs.add(ttk.Frame(self.subtabs), text=name)
+
         # Filters
         self.filter_frame = ttk.LabelFrame(self.frame, text="Filters")
         self.filter_frame.pack(fill="x", padx=10, pady=4)
         f = self.filter_frame
 
-        ttk.Label(f, text="SIC code(s):").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-        self.sic_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self.sic_var, width=20).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(f, text="Search:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+        self.search_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.search_var, width=24).grid(row=0, column=1, sticky="w", padx=4)
 
-        ttk.Label(f, text="Status:").grid(row=0, column=2, sticky="e", padx=4)
+        ttk.Label(f, text="SIC code(s):").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+        self.sic_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.sic_var, width=20).grid(row=0, column=3, sticky="w", padx=4)
+
+        ttk.Label(f, text="Status:").grid(row=0, column=4, sticky="e", padx=4)
         self.status_var = tk.StringVar(value="Active")
         self.status_combo = ttk.Combobox(f, textvariable=self.status_var, state="readonly", width=18)
-        self.status_combo.grid(row=0, column=3, sticky="w", padx=4)
+        self.status_combo.grid(row=0, column=5, sticky="w", padx=4)
         self.status_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_search())
 
-        ttk.Label(f, text="Postcode prefix:").grid(row=0, column=4, sticky="e", padx=4)
+        ttk.Label(f, text="Postcode prefix:").grid(row=1, column=0, sticky="e", padx=4)
         self.postcode_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self.postcode_var, width=10).grid(row=0, column=5, sticky="w", padx=4)
+        ttk.Entry(f, textvariable=self.postcode_var, width=10).grid(row=1, column=1, sticky="w", padx=4)
 
-        ttk.Label(f, text="Year from:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+        ttk.Label(f, text="Year from:").grid(row=1, column=2, sticky="e", padx=4, pady=2)
         self.year_from_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self.year_from_var, width=8).grid(row=1, column=1, sticky="w", padx=4)
-        ttk.Label(f, text="Year to:").grid(row=1, column=2, sticky="e", padx=4)
+        ttk.Entry(f, textvariable=self.year_from_var, width=8).grid(row=1, column=3, sticky="w", padx=4)
+        ttk.Label(f, text="Year to:").grid(row=1, column=4, sticky="e", padx=4)
         self.year_to_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self.year_to_var, width=8).grid(row=1, column=3, sticky="w", padx=4)
+        ttk.Entry(f, textvariable=self.year_to_var, width=8).grid(row=1, column=5, sticky="w", padx=4)
 
-        ttk.Label(f, text="Country:").grid(row=1, column=4, sticky="e", padx=4)
+        ttk.Label(f, text="Country:").grid(row=2, column=0, sticky="e", padx=4)
         self.country_var = tk.StringVar()
         self.country_combo = ttk.Combobox(f, textvariable=self.country_var, state="readonly", width=24)
-        self.country_combo.grid(row=1, column=5, sticky="w", padx=4)
+        self.country_combo.grid(row=2, column=1, sticky="w", padx=4)
         self.country_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_search())
 
-        ttk.Label(f, text="In latest scrape:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+        ttk.Label(f, text="In latest scrape:").grid(row=2, column=2, sticky="e", padx=4, pady=2)
         self.active_var = tk.StringVar(value="Active only")
         self.active_combo = ttk.Combobox(
             f, textvariable=self.active_var, state="readonly", width=18,
             values=["Active only", "Inactive only", "All"],
         )
-        self.active_combo.grid(row=2, column=1, sticky="w", padx=4)
+        self.active_combo.grid(row=2, column=3, sticky="w", padx=4)
         self.active_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_search())
 
+        self.min_director_age_label = ttk.Label(f, text="Min director age:")
+        self.min_director_age_label.grid(row=2, column=4, sticky="e", padx=4, pady=2)
+        self.min_director_age_var = tk.StringVar()
+        self.min_director_age_entry = ttk.Entry(f, textvariable=self.min_director_age_var, width=10)
+        self.min_director_age_entry.grid(row=2, column=5, sticky="w", padx=4)
+
+        self.min_revenue_label = ttk.Label(f, text="Min revenue:")
+        self.min_revenue_label.grid(row=2, column=4, sticky="e", padx=4, pady=2)
+        self.min_revenue_var = tk.StringVar()
+        self.min_revenue_entry = ttk.Entry(f, textvariable=self.min_revenue_var, width=12)
+        self.min_revenue_entry.grid(row=2, column=5, sticky="w", padx=4)
+
+        self.min_employees_label = ttk.Label(f, text="Min employees:")
+        self.min_employees_label.grid(row=3, column=0, sticky="e", padx=4, pady=2)
+        self.min_employees_var = tk.StringVar()
+        self.min_employees_entry = ttk.Entry(f, textvariable=self.min_employees_var, width=10)
+        self.min_employees_entry.grid(row=3, column=1, sticky="w", padx=4)
+
         action_row = ttk.Frame(f)
-        action_row.grid(row=3, column=0, columnspan=6, sticky="e", padx=4, pady=(6, 4))
+        action_row.grid(row=4, column=0, columnspan=6, sticky="e", padx=4, pady=(6, 4))
         self.btn_search = ttk.Button(action_row, text="Search", command=self._on_search)
         self.btn_search.pack(side="left", padx=2)
         ttk.Button(action_row, text="Clear", command=self._on_clear).pack(side="left", padx=2)
         self.btn_export = ttk.Button(action_row, text="Export CSV", command=self._on_export)
         self.btn_export.pack(side="left", padx=2)
 
+        self._configure_subtab_filters()
         _make_filter_grid_responsive(f)
 
         # Results
-        rf = ttk.Frame(self.frame)
-        rf.pack(fill="both", expand=True, padx=10, pady=4)
-        self.count_label = ttk.Label(rf, text="")
+        self.results_frame = ttk.Frame(self.frame)
+        self.results_frame.pack(fill="both", expand=True, padx=10, pady=4)
+        self._build_results_panel()
+        self.subtabs.bind("<<NotebookTabChanged>>", self._on_subtab_change)
+
+    def _build_results_panel(self) -> None:
+        for widget in self.results_frame.winfo_children():
+            widget.destroy()
+        self.count_label = ttk.Label(self.results_frame, text="")
         self.count_label.pack(anchor="w")
-        tree_frame = ttk.Frame(rf)
+        self._build_results_tree()
+        pag = ttk.Frame(self.results_frame)
+        pag.pack(fill="x", pady=4)
+        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
+        self.btn_prev.pack(side="left")
+        self.page_label = ttk.Label(pag, text="Page 1 of 1")
+        self.page_label.pack(side="left", padx=10)
+        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
+        self.btn_next.pack(side="left")
+
+    def _build_results_tree(self) -> None:
+        tree_frame = ttk.Frame(self.results_frame)
         tree_frame.pack(fill="both", expand=True)
-        # Use grid inside tree_frame so we can place both scrollbars cleanly
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
-        cols = [c[0] for c in CH_COLUMNS]
+        cols = [c[0] for c in self._cols_spec]
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
-        for key, heading, width in CH_COLUMNS:
+        for key, heading, width in self._cols_spec:
             self.tree.heading(key, text=heading, command=lambda k=key: self._on_sort(k))
             # stretch=False keeps the column at its declared width when
             # the window narrows — overflow is reached via the hbar
@@ -377,14 +464,55 @@ class CHPane(_PaneBase):
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        pag = ttk.Frame(rf)
-        pag.pack(fill="x", pady=4)
-        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
-        self.btn_prev.pack(side="left")
-        self.page_label = ttk.Label(pag, text="Page 1 of 1")
-        self.page_label.pack(side="left", padx=10)
-        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
-        self.btn_next.pack(side="left")
+
+    def _current_columns(self) -> list[tuple[str, str, int]]:
+        if self.sub_view == "Directors Age":
+            return DIRECTORS_COLUMNS
+        if self.sub_view == "Financials":
+            return FINANCIALS_COLUMNS
+        return CH_COLUMNS
+
+    def _current_sort_attr(self) -> str:
+        if self.sub_view == "Directors Age":
+            return "sort_by_dir"
+        if self.sub_view == "Financials":
+            return "sort_by_fin"
+        return "sort_by_comp"
+
+    def _configure_subtab_filters(self) -> None:
+        if self.sub_view == "Directors Age":
+            self.min_director_age_label.grid()
+            self.min_director_age_entry.grid()
+            self.min_revenue_label.grid_remove()
+            self.min_revenue_entry.grid_remove()
+            self.min_employees_label.grid_remove()
+            self.min_employees_entry.grid_remove()
+        elif self.sub_view == "Financials":
+            self.min_director_age_label.grid_remove()
+            self.min_director_age_entry.grid_remove()
+            self.min_revenue_label.grid()
+            self.min_revenue_entry.grid()
+            self.min_employees_label.grid()
+            self.min_employees_entry.grid()
+        else:
+            self.min_director_age_label.grid_remove()
+            self.min_director_age_entry.grid_remove()
+            self.min_revenue_label.grid_remove()
+            self.min_revenue_entry.grid_remove()
+            self.min_employees_label.grid_remove()
+            self.min_employees_entry.grid_remove()
+
+    def _on_subtab_change(self, event: tk.Event | None = None) -> None:
+        del event
+        if not hasattr(self, "subtabs"):
+            return
+        self.sub_view = self.subtabs.tab(self.subtabs.select(), "text")
+        self._cols_spec = self._current_columns()
+        self._configure_subtab_filters()
+        self.page = 1
+        self._build_results_panel()
+        if hasattr(self.app, "task_label"):
+            self._run_query()
 
     def action_buttons(self) -> list[ttk.Widget]:
         return [self.btn_sync, self.btn_download, self.btn_process,
@@ -392,6 +520,9 @@ class CHPane(_PaneBase):
 
     def _get_filters(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
+        search = self.search_var.get().strip()
+        if search:
+            out["search"] = search
         sic = self.sic_var.get().strip()
         if sic:
             out["sic_codes"] = sic
@@ -410,19 +541,46 @@ class CHPane(_PaneBase):
             out["is_active"] = True
         elif choice == "Inactive only":
             out["is_active"] = False
-        out["sort_by"] = self.sort_by
+        if self.sub_view == "Directors Age":
+            try:
+                out["min_director_age"] = int(self.min_director_age_var.get())
+            except (TypeError, ValueError):
+                pass
+        elif self.sub_view == "Financials":
+            raw_revenue = self.min_revenue_var.get().replace(",", "").strip()
+            if raw_revenue:
+                try:
+                    out["min_revenue"] = float(raw_revenue)
+                except ValueError:
+                    pass
+            try:
+                out["min_employees"] = int(self.min_employees_var.get())
+            except (TypeError, ValueError):
+                pass
+        out["sort_by"] = getattr(self, self._current_sort_attr())
         out["sort_order"] = self.sort_order
         out["page"] = self.page
         out["page_size"] = PAGE_SIZE
         return out
 
     def _on_clear(self) -> None:
-        for v in (self.sic_var, self.postcode_var, self.year_from_var,
-                  self.year_to_var, self.country_var):
+        for v in (
+            self.search_var,
+            self.sic_var,
+            self.postcode_var,
+            self.year_from_var,
+            self.year_to_var,
+            self.country_var,
+            self.min_director_age_var,
+            self.min_revenue_var,
+            self.min_employees_var,
+        ):
             v.set("")
         self.status_var.set("Active")
         self.active_var.set("Active only")
-        self.sort_by = "company_name"
+        self.sort_by_comp = "company_name"
+        self.sort_by_dir = "company_name"
+        self.sort_by_fin = "company_name"
         self.sort_order = "ASC"
         self.page = 1
         self.tree.delete(*self.tree.get_children())
@@ -434,10 +592,12 @@ class CHPane(_PaneBase):
         self._run_query()
 
     def _on_sort(self, col: str) -> None:
-        if self.sort_by == col and self.sort_order == "ASC":
+        attr = self._current_sort_attr()
+        if getattr(self, attr) == col and self.sort_order == "ASC":
             self.sort_order = "DESC"
         else:
-            self.sort_by, self.sort_order = col, "ASC"
+            setattr(self, attr, col)
+            self.sort_order = "ASC"
         self.page = 1
         self._run_query()
 
@@ -458,7 +618,13 @@ class CHPane(_PaneBase):
         self.btn_search.configure(state="disabled"); self.btn_export.configure(state="disabled")
         def worker(cancel_event: threading.Event | None = None) -> None:
             try:
-                rows, total = self.ch.query_advanced(**self._get_filters())
+                filters = self._get_filters()
+                if self.sub_view == "Companies":
+                    rows, total = self.ch.query_advanced(**filters)
+                elif self.sub_view == "Directors Age":
+                    rows, total = self.ch.query_directors_age_advanced(**filters)
+                else:
+                    rows, total = self.ch.query_financials_advanced(**filters)
                 self.app.root.after(0, lambda: self._display(rows, total))
             except FileNotFoundError:
                 self.app.root.after(0, lambda: self.app._set_status("No DB. Click Sync first."))
@@ -475,8 +641,15 @@ class CHPane(_PaneBase):
         self.total_pages = max(1, -(-total // PAGE_SIZE))
         self.tree.delete(*self.tree.get_children())
         for row in rows:
-            self.tree.insert("", "end", values=[_format_cell(row.get(c[0])) for c in CH_COLUMNS])
-        self.count_label.configure(text=f"{total:,} rows")
+            self.tree.insert(
+                "",
+                "end",
+                values=[_format_cell(row.get(c[0])) for c in self._cols_spec],
+            )
+        if self.sub_view != "Companies" and total == 0:
+            self.count_label.configure(text="No enrichment data — run enrichment first.")
+        else:
+            self.count_label.configure(text=f"{total:,} rows")
         self.page_label.configure(text=f"Page {self.page} of {self.total_pages}")
         self.btn_prev.configure(state="normal" if self.page > 1 else "disabled")
         self.btn_next.configure(state="normal" if self.page < self.total_pages else "disabled")
@@ -485,7 +658,7 @@ class CHPane(_PaneBase):
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile="ch_export.csv",
+            initialfile=f"ch_{self.sub_view.lower().replace(' ', '_')}_export.csv",
         )
         if not path: return
         filters = self._get_filters()
@@ -494,7 +667,12 @@ class CHPane(_PaneBase):
         self.app._set_status("Exporting...")
         def worker(cancel_event: threading.Event | None = None) -> None:
             try:
-                n = self.ch.export_filtered_csv(path, **filters)
+                if self.sub_view == "Companies":
+                    n = self.ch.export_filtered_csv(path, **filters)
+                elif self.sub_view == "Directors Age":
+                    n = self.ch.export_directors_age_csv(path, **filters)
+                else:
+                    n = self.ch.export_financials_csv(path, **filters)
                 self.app.root.after(0, lambda: self.app._set_status(f"Exported {n:,} rows to {path}"))
             except Exception as exc:
                 logger.exception("CH export error")

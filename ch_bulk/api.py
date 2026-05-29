@@ -50,8 +50,12 @@ from ch_bulk.companies_house.processor import (
     process_csvs,
 )
 from ch_bulk.companies_house.query import export_query_csv, get_db_info, query_by_sic
+from ch_bulk.companies_house.query import export_directors_age_csv as _export_directors_age_csv
 from ch_bulk.companies_house.query import export_filtered_csv as _export_filtered_csv
+from ch_bulk.companies_house.query import export_financials_csv as _export_financials_csv
 from ch_bulk.companies_house.query import get_filter_options as _get_filter_options
+from ch_bulk.companies_house.query import query_directors_age
+from ch_bulk.companies_house.query import query_financials
 from ch_bulk.companies_house.query import query_companies
 from ch_bulk.web.website_finder import (
     WebsiteFinder,
@@ -741,6 +745,14 @@ class ChBulk:
         """Multi-filter paginated query against joined HSCA locations."""
         return query_hsca_locations(self.db_path, **filters)
 
+    def query_directors_age_advanced(self, **filters) -> tuple[list[dict], int]:
+        """Multi-filter paginated query against CH director-age enrichment rows."""
+        return query_directors_age(self.db_path, **filters)
+
+    def query_financials_advanced(self, **filters) -> tuple[list[dict], int]:
+        """Multi-filter paginated query against CH financial enrichment rows."""
+        return query_financials(self.db_path, **filters)
+
     def get_cqc_filter_options(self) -> dict:
         """Distinct values for CQC filter dropdowns."""
         return _get_cqc_filter_options(self.db_path)
@@ -756,6 +768,14 @@ class ChBulk:
     def export_hsca_locations_csv(self, output_path, **filters) -> int:
         """Export filtered joined HSCA locations to CSV. Returns row count."""
         return _export_hsca_locations_csv(self.db_path, output_path, **filters)
+
+    def export_directors_age_csv(self, output_path, **filters) -> int:
+        """Export filtered CH director-age enrichment rows to CSV."""
+        return _export_directors_age_csv(self.db_path, output_path, **filters)
+
+    def export_financials_csv(self, output_path, **filters) -> int:
+        """Export filtered CH financial enrichment rows to CSV."""
+        return _export_financials_csv(self.db_path, output_path, **filters)
 
     def export_filtered_csv(self, output_path, **filters) -> int:
         """Export filtered results to CSV via DuckDB COPY. Returns row count."""
