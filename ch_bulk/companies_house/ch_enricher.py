@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
 import duckdb
 import httpx
 
+from ch_bulk.core.cancellation import (
+    OperationCancelled,
+    cancellable_sleep,
+    raise_if_cancelled,
+)
 from ch_bulk.core.logging import FsyncLineLogger
-from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.bootstrap import ensure_pipeline_schema, recover_interrupted_compaction
 from ch_bulk.core.paths import DEFAULT_DATA_DIR, revenue_bands_path
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
 from ch_bulk.companies_house.revenue_model import estimate, load_bands
@@ -130,10 +136,20 @@ class CompaniesHouseClient:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _get(self, path: str, *, params: dict | None = None) -> dict:
+    def _get(
+        self,
+        path: str,
+        *,
+        params: dict | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
         for attempt in range(5):
-            self._short_throttle.wait()
-            self._long_throttle.wait()
+            if cancel_event is None:
+                self._short_throttle.wait()
+                self._long_throttle.wait()
+            else:
+                self._short_throttle.wait(cancel_event=cancel_event)
+                self._long_throttle.wait(cancel_event=cancel_event)
             response = self._client.get(path, params=params)
 
             if response.status_code == 429:
@@ -147,7 +163,12 @@ class CompaniesHouseClient:
                     path,
                     pause,
                 )
-                time.sleep(pause)
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"Companies House retry cancelled: {path}",
+                    sleep_fn=time.sleep,
+                )
                 continue
 
             if response.status_code in {502, 503, 504}:
@@ -158,7 +179,12 @@ class CompaniesHouseClient:
                     path,
                     pause,
                 )
-                time.sleep(pause)
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"Companies House retry cancelled: {path}",
+                    sleep_fn=time.sleep,
+                )
                 continue
 
             response.raise_for_status()
@@ -166,11 +192,16 @@ class CompaniesHouseClient:
 
         raise RuntimeError(f"Companies House API failed after retries: {path}")
 
-    def get_officers(self, company_number: str) -> list[dict]:
-        payload = self._get(
-            f"/company/{company_number}/officers",
-            params={"items_per_page": 100},
-        )
+    def get_officers(
+        self,
+        company_number: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> list[dict]:
+        request_kwargs: dict[str, object] = {"params": {"items_per_page": 100}}
+        if cancel_event is not None:
+            request_kwargs["cancel_event"] = cancel_event
+        payload = self._get(f"/company/{company_number}/officers", **request_kwargs)
         return payload.get("items", [])
 
 
@@ -462,6 +493,7 @@ def _load_director_staging_file(
     db_path: str | Path,
     *,
     path: Path,
+    final_status: str = "succeeded",
 ) -> LoadedBatch:
     batch_id = batch_id_from_staging_path("ch_directors", path)
 
@@ -548,7 +580,7 @@ def _load_director_staging_file(
                 finish_sync_batch(
                     con,
                     batch_id,
-                    status="succeeded",
+                    status=final_status,
                     records_fetched=final_records_fetched,
                     records_updated=final_records_updated,
                     error_count=final_error_count,
@@ -592,6 +624,7 @@ def load_director_staging(
     db_path: str | Path,
     *,
     batch_id: str | None = None,
+    final_status: str = "succeeded",
 ) -> dict[str, object]:
     results: list[LoadedBatch] = []
     for path in pending_staging_files(
@@ -603,6 +636,7 @@ def load_director_staging(
             _load_director_staging_file(
                 db_path,
                 path=path,
+                final_status=final_status,
             )
         )
     summary = summarize_loaded_batches("ch_directors", results)
@@ -702,6 +736,7 @@ def enrich_directors(
     company_numbers: list[str] | None = None,
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, int | str]:
     db_path = Path(db_path)
     data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
@@ -816,10 +851,20 @@ def enrich_directors(
 
         with CompaniesHouseClient(data_dir) as client:
             for company_number in targets:
+                raise_if_cancelled(
+                    cancel_event,
+                    reason="director enrichment cancelled",
+                )
                 status = "error"
                 http_status: int | None = None
                 try:
-                    officers = client.get_officers(company_number)
+                    if cancel_event is None:
+                        officers = client.get_officers(company_number)
+                    else:
+                        officers = client.get_officers(
+                            company_number,
+                            cancel_event=cancel_event,
+                        )
                     http_status = 200
                     staging_writer.append(
                         StagedAPIResponse(
@@ -838,6 +883,8 @@ def enrich_directors(
                         status = "skip"
                     else:
                         status = "ok"
+                except OperationCancelled:
+                    raise
                 except httpx.HTTPStatusError as exc:
                     response = exc.response
                     if response is not None:
@@ -882,6 +929,10 @@ def enrich_directors(
                 if staged_since_sync >= batch_size_value:
                     checkpoint_write_phase()
 
+        raise_if_cancelled(
+            cancel_event,
+            reason="director enrichment cancelled",
+        )
         checkpoint_write_phase()
         load_summary = load_director_staging(
             data_dir,
@@ -922,6 +973,49 @@ def enrich_directors(
             "batch_id": batch_id,
             "log_path": str(run_log.path),
         }
+    except OperationCancelled:
+        if staging_writer is not None:
+            staging_writer.flush_and_fsync()
+        if batch_id is not None:
+            if total_fetched > 0:
+                load_summary = load_director_staging(
+                    data_dir,
+                    db_path,
+                    batch_id=batch_id,
+                    final_status="cancelled",
+                )
+                if run_log is not None:
+                    elapsed_seconds = time.monotonic() - started_monotonic
+                    run_log.write_line(
+                        "cancelled "
+                        f"requested={len(targets)} "
+                        f"records_fetched={load_summary['records_fetched']} "
+                        f"records_updated={load_summary['records_updated']} "
+                        f"errors={load_summary['error_count']} "
+                        f"elapsed={_duration_text(elapsed_seconds)}"
+                    )
+                    run_log.flush_and_fsync()
+            else:
+                def mark_cancelled(con: duckdb.DuckDBPyConnection) -> None:
+                    finish_sync_batch(
+                        con,
+                        batch_id,
+                        status="cancelled",
+                        records_fetched=0,
+                        records_updated=0,
+                        error_count=0,
+                    )
+
+                with_duckdb_connection(db_path, mark_cancelled)
+                if run_log is not None:
+                    elapsed_seconds = time.monotonic() - started_monotonic
+                    run_log.write_line(
+                        "cancelled "
+                        "requested=0 records_fetched=0 records_updated=0 errors=0 "
+                        f"elapsed={_duration_text(elapsed_seconds)}"
+                    )
+                    run_log.flush_and_fsync()
+        raise
     except BaseException:
         if staging_writer is not None:
             staging_writer.flush_and_fsync()
@@ -969,6 +1063,7 @@ def enrich_revenue(
     bands_path = revenue_bands_path(data_dir)
     bands = load_bands(bands_path)
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         ensure_pipeline_schema(con)

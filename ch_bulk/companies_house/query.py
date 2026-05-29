@@ -7,6 +7,8 @@ from pathlib import Path
 
 import duckdb
 
+from ch_bulk.db.bootstrap import recover_interrupted_compaction
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +87,7 @@ def query_by_sic(
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         result = con.execute(sql, params)
@@ -141,6 +144,7 @@ def export_query_csv(
     # Escape path for safe SQL embedding (backslashes then single quotes)
     safe_path = str(output_path).replace("\\", "\\\\").replace("'", "''")
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         # Materialize into temp table (DuckDB doesn't allow params in CREATE VIEW)
@@ -180,6 +184,7 @@ def get_db_info(db_path: str | Path) -> dict:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         # Total companies
@@ -376,6 +381,7 @@ def get_filter_options(db_path: str | Path) -> dict:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         statuses = [
@@ -445,6 +451,7 @@ def export_filtered_csv(
     # Escape path for safe SQL embedding (backslashes then single quotes)
     safe_path = str(output_path).replace("\\", "\\\\").replace("'", "''")
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         # Materialize into temp table (DuckDB doesn't allow params in CREATE VIEW)

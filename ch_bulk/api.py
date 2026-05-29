@@ -5,13 +5,15 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import duckdb
 
+from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.core.logging import setup_logging
-from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.bootstrap import ensure_pipeline_schema, recover_interrupted_compaction
 from ch_bulk.companies_house.ch_enricher import enrich_directors as _enrich_directors
 from ch_bulk.companies_house.ch_enricher import load_director_staging as _load_director_staging
 from ch_bulk.web.classifier import WebsiteClassifier, load_classification_staging as _load_classification_staging
@@ -148,6 +150,7 @@ class ChBulk:
         progress_callback: callable | None = None,
         compact: bool = True,
         force: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> int:
         """Ingest downloaded CSV files into DuckDB via upsert.
 
@@ -196,6 +199,8 @@ class ChBulk:
         months = _group_by_month(csv_files)
         row_count = 0
         for month_key in sorted(months.keys()):
+            if cancel_event is not None and cancel_event.is_set():
+                raise OperationCancelled("CH bulk processing cancelled")
             month_files = months[month_key]
             if progress_callback:
                 progress_callback(
@@ -210,12 +215,23 @@ class ChBulk:
                 progress_callback=progress_callback,
                 force=force,
                 compact=False,
+                cancel_event=cancel_event,
             )
         if compact:
-            compact_database(self.db_path, progress_callback=progress_callback)
+            if cancel_event is not None and cancel_event.is_set():
+                raise OperationCancelled("CH bulk processing cancelled")
+            compact_database(
+                self.db_path,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+            )
         return row_count
 
-    def compact(self, progress_callback: callable | None = None) -> None:
+    def compact(
+        self,
+        progress_callback: callable | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         """Rebuild the database file to reclaim disk space.
 
         Use this after manually editing the database (e.g., dropping
@@ -228,7 +244,13 @@ class ChBulk:
         Raises:
             FileNotFoundError: If the database does not exist.
         """
-        compact_database(self.db_path, progress_callback=progress_callback)
+        if cancel_event is not None and cancel_event.is_set():
+            raise OperationCancelled("database compaction cancelled")
+        compact_database(
+            self.db_path,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
 
     def bootstrap(self) -> None:
         """Create the extended homecare pipeline schema objects.
@@ -238,6 +260,7 @@ class ChBulk:
         deferred until a later call.
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        recover_interrupted_compaction(self.db_path)
         con = duckdb.connect(str(self.db_path))
         try:
             ensure_pipeline_schema(con)
@@ -269,6 +292,7 @@ class ChBulk:
         progress_callback: callable | None = None,
         compact: bool = True,
         force: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> int:
         """Ingest CQC directory CSV into the DuckDB database.
 
@@ -295,12 +319,14 @@ class ChBulk:
             progress_callback=progress_callback,
             force=force,
             compact=compact,
+            cancel_event=cancel_event,
         )
 
     def sync_cqc(
         self,
         force: bool = False,
         progress_callback: callable | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> int:
         """Download + process the latest CQC directory in one step."""
         csv_file = self.download_cqc(progress_callback=progress_callback)
@@ -308,6 +334,7 @@ class ChBulk:
             csv_file=csv_file,
             progress_callback=progress_callback,
             force=force,
+            cancel_event=cancel_event,
         )
 
     def download_hsca(
@@ -328,6 +355,7 @@ class ChBulk:
         progress_callback: callable | None = None,
         compact: bool = True,
         force: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> int:
         """Ingest the latest HSCA ODS into the DuckDB database."""
         if ods_file is None:
@@ -343,6 +371,7 @@ class ChBulk:
             progress_callback=progress_callback,
             force=force,
             compact=compact,
+            cancel_event=cancel_event,
         )
 
     def cqc_hsca_sync(
@@ -350,6 +379,7 @@ class ChBulk:
         force: bool = False,
         target_date=None,
         progress_callback: callable | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> int:
         """Download + process the latest HSCA ODS in one step."""
         ods_file = self.download_hsca(
@@ -360,6 +390,7 @@ class ChBulk:
             ods_file=ods_file,
             progress_callback=progress_callback,
             force=force,
+            cancel_event=cancel_event,
         )
 
     def cqc_enrich_providers(
@@ -368,9 +399,17 @@ class ChBulk:
         mode: str = "incremental",
         ids: list[str] | None = None,
         batch_size: int = 1000,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         enricher = CQCAPIEnricher(self.data_dir, self.db_path)
-        return enricher.enrich_providers(mode=mode, ids=ids, batch_size=batch_size)
+        if cancel_event is None:
+            return enricher.enrich_providers(mode=mode, ids=ids, batch_size=batch_size)
+        return enricher.enrich_providers(
+            mode=mode,
+            ids=ids,
+            batch_size=batch_size,
+            cancel_event=cancel_event,
+        )
 
     def cqc_enrich_locations(
         self,
@@ -378,9 +417,17 @@ class ChBulk:
         mode: str = "incremental",
         ids: list[str] | None = None,
         batch_size: int = 1000,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         enricher = CQCAPIEnricher(self.data_dir, self.db_path)
-        return enricher.enrich_locations(mode=mode, ids=ids, batch_size=batch_size)
+        if cancel_event is None:
+            return enricher.enrich_locations(mode=mode, ids=ids, batch_size=batch_size)
+        return enricher.enrich_locations(
+            mode=mode,
+            ids=ids,
+            batch_size=batch_size,
+            cancel_event=cancel_event,
+        )
 
     def ch_enrich_directors(
         self,
@@ -389,14 +436,20 @@ class ChBulk:
         company_numbers: list[str] | None = None,
         force: bool = False,
         batch_size: int = 1000,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, int | str]:
+        request_kwargs: dict[str, object] = {
+            "sic": sic,
+            "company_numbers": company_numbers,
+            "force": force,
+            "batch_size": batch_size,
+        }
+        if cancel_event is not None:
+            request_kwargs["cancel_event"] = cancel_event
         return _enrich_directors(
             self.db_path,
             self.data_dir,
-            sic=sic,
-            company_numbers=company_numbers,
-            force=force,
-            batch_size=batch_size,
+            **request_kwargs,
         )
 
     def ch_enrich_revenue(
@@ -420,15 +473,21 @@ class ChBulk:
         workers: int = 3,
         parser_workers: int = 4,
         batch_size: int = 100,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
+        request_kwargs: dict[str, object] = {
+            "mode": mode,
+            "ids": ids,
+            "workers": workers,
+            "parser_workers": parser_workers,
+            "batch_size": batch_size,
+        }
+        if cancel_event is not None:
+            request_kwargs["cancel_event"] = cancel_event
         return _enrich_financials(
             self.db_path,
             self.data_dir,
-            mode=mode,
-            ids=ids,
-            workers=workers,
-            parser_workers=parser_workers,
-            batch_size=batch_size,
+            **request_kwargs,
         )
 
     def classify(
@@ -437,9 +496,17 @@ class ChBulk:
         mode: str = "incremental",
         ids: list[str] | None = None,
         batch_size: int = 100,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         with WebsiteClassifier(self.data_dir, self.db_path) as classifier:
-            return classifier.classify(mode=mode, ids=ids, batch_size=batch_size)
+            request_kwargs: dict[str, object] = {
+                "mode": mode,
+                "ids": ids,
+                "batch_size": batch_size,
+            }
+            if cancel_event is not None:
+                request_kwargs["cancel_event"] = cancel_event
+            return classifier.classify(**request_kwargs)
 
     def find_websites(
         self,
@@ -447,13 +514,17 @@ class ChBulk:
         mode: str = "incremental",
         ids: list[str] | None = None,
         pause_seconds: float = 0.7,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         with WebsiteFinder(self.data_dir, self.db_path) as finder:
-            return finder.find(
-                mode=mode,
-                ids=ids,
-                pause_seconds=pause_seconds,
-            )
+            request_kwargs: dict[str, object] = {
+                "mode": mode,
+                "ids": ids,
+                "pause_seconds": pause_seconds,
+            }
+            if cancel_event is not None:
+                request_kwargs["cancel_event"] = cancel_event
+            return finder.find(**request_kwargs)
 
     def migration_export(
         self,
@@ -561,6 +632,7 @@ class ChBulk:
         month: str | None = None,
         keep_zips: bool = False,
         force: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> int:
         """Download and process in one step.
 
@@ -576,7 +648,11 @@ class ChBulk:
             Total number of rows ingested.
         """
         csv_files = self.download(month=month, keep_zips=keep_zips)
-        return self.process(csv_files=csv_files, force=force)
+        return self.process(
+            csv_files=csv_files,
+            force=force,
+            cancel_event=cancel_event,
+        )
 
     def export_sqlite(self, output_path: str | Path) -> Path:
         """Export the DuckDB database to a SQLite file.
@@ -604,6 +680,7 @@ class ChBulk:
         # Escape path for safe SQL embedding (backslashes then single quotes)
         safe_path = str(output_path).replace("\\", "\\\\").replace("'", "''")
 
+        recover_interrupted_compaction(self.db_path)
         con = duckdb.connect(str(self.db_path))
         try:
             con.execute("INSTALL sqlite; LOAD sqlite;")

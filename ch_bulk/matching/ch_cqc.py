@@ -12,7 +12,7 @@ from typing import Literal
 import duckdb
 from rapidfuzz import fuzz
 
-from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.bootstrap import ensure_pipeline_schema, recover_interrupted_compaction
 from ch_bulk.db.sync_batches import utcnow_naive
 
 logger = logging.getLogger(__name__)
@@ -759,6 +759,7 @@ def match_companies_to_cqc(
     )
 
     mode_value = _validated_mode(mode)
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         ensure_pipeline_schema(con)

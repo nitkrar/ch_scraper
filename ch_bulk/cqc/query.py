@@ -7,6 +7,8 @@ from pathlib import Path
 
 import duckdb
 
+from ch_bulk.db.bootstrap import recover_interrupted_compaction
+
 logger = logging.getLogger(__name__)
 
 CQC_LOCATION_SORT_COLUMNS = {
@@ -176,6 +178,7 @@ def query_cqc_locations(
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_locations{where_sql}"
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         total = con.execute(count_sql, params).fetchone()[0]
@@ -227,6 +230,7 @@ def query_cqc_providers(
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_providers{where_sql}"
 
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         total = con.execute(count_sql, params).fetchone()[0]
@@ -244,6 +248,7 @@ def get_cqc_filter_options(db_path: str | Path) -> dict:
     db_path = Path(db_path)
     if not db_path.exists():
         return {"service_types": [], "regions": [], "local_authorities": []}
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         service_types = [
@@ -291,6 +296,7 @@ def export_cqc_locations_csv(
         f"TO '{str(output_path).replace(chr(39), chr(39)*2)}' (HEADER, DELIMITER ',')"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_locations{where_sql}"
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         n = con.execute(count_sql, params).fetchone()[0]
@@ -314,6 +320,7 @@ def export_cqc_providers_csv(
         f"TO '{str(output_path).replace(chr(39), chr(39)*2)}' (HEADER, DELIMITER ',')"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_providers{where_sql}"
+    recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))
     try:
         n = con.execute(count_sql, params).fetchone()[0]

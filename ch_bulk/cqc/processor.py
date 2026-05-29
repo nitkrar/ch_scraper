@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -26,7 +27,8 @@ import duckdb
 import pandas as pd
 from rich.console import Console
 
-from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.core.cancellation import OperationCancelled, raise_if_cancelled
+from ch_bulk.db.bootstrap import ensure_pipeline_schema, recover_interrupted_compaction
 from ch_bulk.core.paths import SQL_DIR as _ROOT_SQL_DIR
 from ch_bulk.companies_house.processor import (
     SanityCheckError,
@@ -289,9 +291,12 @@ def _build_hsca_location_rows(
     df: pd.DataFrame,
     scrape_date: date,
     imported_at: datetime,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for record in df.to_dict(orient="records"):
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
         location_id = _clean_text(record.get("Location ID"))
         provider_id = _clean_text(record.get("Provider ID"))
         if location_id is None or provider_id is None:
@@ -333,9 +338,14 @@ def _build_hsca_location_rows(
     return rows
 
 
-def _build_hsca_dual_rows(df: pd.DataFrame) -> list[dict[str, object]]:
+def _build_hsca_dual_rows(
+    df: pd.DataFrame,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for record in df.to_dict(orient="records"):
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
         location_id = _clean_text(record.get("Location ID"))
         provider_id = _clean_text(record.get("Provider ID"))
         linked_org_id = _clean_text(record.get("Linked Organisation ID"))
@@ -652,6 +662,7 @@ def process_cqc_csv(
     force: bool = False,
     scrape_date_override: date | None = None,
     compact: bool = True,
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """Ingest one CQC directory CSV into the DuckDB database.
 
@@ -662,6 +673,7 @@ def process_cqc_csv(
     if not csv_file.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_file}")
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    recover_interrupted_compaction(db_path)
 
     scrape_date = scrape_date_override or scrape_date_from_cqc_filename(csv_file)
 
@@ -705,10 +717,13 @@ def process_cqc_csv(
     t_total = time.perf_counter()
     con = duckdb.connect(str(db_path))
     try:
+        raise_if_cancelled(cancel_event, reason="CQC bulk processing cancelled")
         _do_ingest(con)
+        raise_if_cancelled(cancel_event, reason="CQC bulk processing cancelled")
         result = _do_sanity(con)
         _enforce_cqc_sanity(result, force=force)
 
+        raise_if_cancelled(cancel_event, reason="CQC bulk processing cancelled")
         if not result.companies_exists:
             _do_bootstrap(con)
         else:
@@ -718,7 +733,9 @@ def process_cqc_csv(
             )
             _do_upsert(con)
 
+        raise_if_cancelled(cancel_event, reason="CQC bulk processing cancelled")
         _do_rollup(con)
+        raise_if_cancelled(cancel_event, reason="CQC bulk processing cancelled")
         _do_indexes(con)
         con.execute("DROP TABLE IF EXISTS cqc_locations_staging")
 
@@ -740,7 +757,12 @@ def process_cqc_csv(
         con.close()
 
     if compact:
-        compact_database(db_path, progress_callback=progress_callback)
+        raise_if_cancelled(cancel_event, reason="CQC bulk processing cancelled")
+        compact_database(
+            db_path,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
 
     return loc_count
 
@@ -752,6 +774,7 @@ def process_hsca_filters(
     force: bool = False,
     scrape_date_override: date | None = None,
     compact: bool = True,
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """Ingest one HSCA active locations ODS into the DuckDB database.
 
@@ -762,6 +785,7 @@ def process_hsca_filters(
     if not file_path.exists():
         raise FileNotFoundError(f"ODS file not found: {file_path}")
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    recover_interrupted_compaction(db_path)
 
     scrape_date = scrape_date_override or scrape_date_from_hsca_filename(file_path)
 
@@ -775,6 +799,8 @@ def process_hsca_filters(
     t_total = time.perf_counter()
     con = duckdb.connect(str(db_path))
     batch_id: str | None = None
+    locations_count = 0
+    dual_count = 0
     try:
         ensure_pipeline_schema(con)
         batch_id = insert_sync_batch(con, sync_type="bulk_hsca", mode="all")
@@ -801,9 +827,18 @@ def process_hsca_filters(
                 )
 
             imported_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
             return (
-                _build_hsca_location_rows(locations_df, scrape_date, imported_at),
-                _build_hsca_dual_rows(dual_df),
+                _build_hsca_location_rows(
+                    locations_df,
+                    scrape_date,
+                    imported_at,
+                    cancel_event=cancel_event,
+                ),
+                _build_hsca_dual_rows(
+                    dual_df,
+                    cancel_event=cancel_event,
+                ),
             )
 
         @timed_phase("hsca_ingest_to_staging")
@@ -830,8 +865,11 @@ def process_hsca_filters(
                 con.execute("ROLLBACK")
                 raise
 
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
         locations_rows, dual_rows = _do_parse()
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
         _do_ingest(locations_rows, dual_rows)
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
         result = _do_sanity()
         _enforce_hsca_sanity(result, force=force)
 
@@ -847,6 +885,7 @@ def process_hsca_filters(
                 f"CH-number populated {result.ch_numbers_pct:.2f}%"
             )
 
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
         _do_upsert()
         con.execute("DROP TABLE IF EXISTS cqc_hsca_locations_staging")
         con.execute("DROP TABLE IF EXISTS cqc_hsca_dual_registrations_staging")
@@ -858,6 +897,7 @@ def process_hsca_filters(
             "SELECT COUNT(*) FROM cqc_hsca_dual_registrations"
         ).fetchone()[0]
 
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
         finish_sync_batch(
             con,
             batch_id,
@@ -881,6 +921,17 @@ def process_hsca_filters(
             total,
             batch_id,
         )
+    except OperationCancelled:
+        if batch_id is not None:
+            finish_sync_batch(
+                con,
+                batch_id,
+                status="cancelled",
+                records_fetched=locations_count,
+                records_updated=locations_count,
+                error_count=0,
+            )
+        raise
     except Exception:
         if batch_id is not None:
             finish_sync_batch(
@@ -896,6 +947,11 @@ def process_hsca_filters(
         con.close()
 
     if compact:
-        compact_database(db_path, progress_callback=progress_callback)
+        raise_if_cancelled(cancel_event, reason="HSCA processing cancelled")
+        compact_database(
+            db_path,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
 
     return locations_count

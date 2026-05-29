@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from ch_bulk.core.cancellation import cancellable_sleep
 from ch_bulk.core.paths import DEFAULT_DATA_DIR
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
 from ch_bulk.core.settings import load_settings
@@ -70,9 +72,17 @@ class CQCAPIClient:
         except json.JSONDecodeError:
             return response.text
 
-    def _get(self, path: str) -> APIResult:
+    def _get(
+        self,
+        path: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> APIResult:
         for attempt in range(5):
-            self._throttle.wait()
+            if cancel_event is None:
+                self._throttle.wait()
+            else:
+                self._throttle.wait(cancel_event=cancel_event)
             response = self._client.get(path)
             payload = self._decode_payload(response)
 
@@ -83,7 +93,12 @@ class CQCAPIClient:
                 except ValueError:
                     pause = DEFAULT_RETRY_AFTER_SECONDS
                 logger.warning("CQC API 429 for %s, sleeping %ss", path, pause)
-                time.sleep(pause)
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"CQC API retry cancelled: {path}",
+                    sleep_fn=time.sleep,
+                )
                 continue
 
             if response.status_code in {502, 503, 504}:
@@ -94,7 +109,12 @@ class CQCAPIClient:
                     path,
                     pause,
                 )
-                time.sleep(pause)
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"CQC API retry cancelled: {path}",
+                    sleep_fn=time.sleep,
+                )
                 continue
 
             if response.status_code in {200, 404}:
@@ -104,8 +124,22 @@ class CQCAPIClient:
 
         raise RuntimeError(f"CQC API failed after retries: {path}")
 
-    def get_provider(self, provider_id: str) -> APIResult:
-        return self._get(f"/providers/{provider_id}")
+    def get_provider(
+        self,
+        provider_id: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> APIResult:
+        if cancel_event is None:
+            return self._get(f"/providers/{provider_id}")
+        return self._get(f"/providers/{provider_id}", cancel_event=cancel_event)
 
-    def get_location(self, location_id: str) -> APIResult:
-        return self._get(f"/locations/{location_id}")
+    def get_location(
+        self,
+        location_id: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> APIResult:
+        if cancel_event is None:
+            return self._get(f"/locations/{location_id}")
+        return self._get(f"/locations/{location_id}", cancel_event=cancel_event)

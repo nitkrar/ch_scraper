@@ -14,7 +14,7 @@ from typing import Any, Callable, TypeVar
 import duckdb
 
 from ch_bulk.core.paths import run_stage_file, runs_dir
-from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.db.bootstrap import ensure_pipeline_schema, recover_interrupted_compaction
 from ch_bulk.db.sync_batches import finish_sync_batch, update_sync_batch_progress
 
 DB_LOCK_RETRY_ATTEMPTS = 120
@@ -176,6 +176,7 @@ def with_duckdb_connection(
     for attempt in range(attempts):
         con: duckdb.DuckDBPyConnection | None = None
         try:
+            recover_interrupted_compaction(db_path)
             con = duckdb.connect(str(db_path), read_only=read_only)
             return callback(con)
         except Exception as exc:

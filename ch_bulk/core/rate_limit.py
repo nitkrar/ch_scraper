@@ -7,6 +7,8 @@ import threading
 import time
 from collections import deque
 
+from ch_bulk.core.cancellation import cancellable_sleep
+
 
 class SlidingWindowThrottle:
     """Simple sliding-window throttle.
@@ -30,7 +32,7 @@ class SlidingWindowThrottle:
         self._timestamps: deque[float] = deque()
         self._lock = threading.Lock()
 
-    def wait(self) -> None:
+    def wait(self, *, cancel_event: threading.Event | None = None) -> None:
         while True:
             with self._lock:
                 now = time.monotonic()
@@ -48,4 +50,9 @@ class SlidingWindowThrottle:
                     self.label,
                     sleep_for,
                 )
-            time.sleep(sleep_for)
+            cancellable_sleep(
+                cancel_event,
+                sleep_for,
+                reason=f"throttle wait cancelled: {self.label}",
+                sleep_fn=time.sleep,
+            )

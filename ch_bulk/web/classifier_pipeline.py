@@ -15,6 +15,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from ch_bulk.web import browser
+from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
 from ch_bulk.core.settings import load_settings
@@ -325,6 +326,7 @@ class WebsiteClassifier:
         mode: str = "incremental",
         ids: list[str] | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         validated_mode = _validated_mode(mode)
         validated_batch_size = _validated_batch_size(batch_size)
@@ -344,6 +346,7 @@ class WebsiteClassifier:
         main_writer_lock = threading.Lock()
         fallback_writer_lock = threading.Lock()
         stop_event = threading.Event()
+        cancel_requested = threading.Event()
         load_requested = threading.Event()
         main_input_queue: queue.Queue[tuple[str, list[str]] | None] = queue.Queue()
         fallback_queue: queue.Queue[FallbackTask | None] = queue.Queue()
@@ -490,6 +493,10 @@ class WebsiteClassifier:
             def raise_fallback_failure() -> None:
                 if fallback_failures:
                     raise fallback_failures[0]
+
+            def note_external_cancel() -> None:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancel_requested.set()
 
             run_log = FsyncLineLogger(
                 self.data_dir,
@@ -681,6 +688,9 @@ class WebsiteClassifier:
                 assert main_writer is not None
                 try:
                     while not stop_event.is_set():
+                        note_external_cancel()
+                        if cancel_requested.is_set():
+                            break
                         item = main_input_queue.get()
                         if item is None or stop_event.is_set():
                             break
@@ -779,6 +789,7 @@ class WebsiteClassifier:
                 main_input_queue.put(None)
 
             while any(thread.is_alive() for thread in main_threads):
+                note_external_cancel()
                 raise_main_failure()
                 raise_fallback_failure()
                 if load_requested.wait(timeout=0.25):
@@ -800,6 +811,7 @@ class WebsiteClassifier:
             if fallback_thread is not None:
                 fallback_queue.put(None)
                 while fallback_thread.is_alive():
+                    note_external_cancel()
                     raise_main_failure()
                     raise_fallback_failure()
                     if load_requested.wait(timeout=0.25):
@@ -809,18 +821,32 @@ class WebsiteClassifier:
 
             flush_log()
             load_ready_chunks()
-            records_updated, unable_count, error_count = batch_totals(status="succeeded")
+            final_status = "cancelled" if cancel_requested.is_set() else "succeeded"
+            records_updated, unable_count, error_count = batch_totals(status=final_status)
             elapsed_seconds = time.monotonic() - started_monotonic
-            log_line(
-                "complete "
-                f"requested={total_requested} "
-                f"classified={records_updated} "
-                f"unable={unable_count} "
-                f"errors={error_count} "
-                f"fallback_enqueued={fallback_enqueued} "
-                f"elapsed={_duration_text(elapsed_seconds)}"
-            )
+            if final_status == "cancelled":
+                log_line(
+                    "cancelled "
+                    f"requested={total_requested} "
+                    f"classified={records_updated} "
+                    f"unable={unable_count} "
+                    f"errors={error_count} "
+                    f"fallback_enqueued={fallback_enqueued} "
+                    f"elapsed={_duration_text(elapsed_seconds)}"
+                )
+            else:
+                log_line(
+                    "complete "
+                    f"requested={total_requested} "
+                    f"classified={records_updated} "
+                    f"unable={unable_count} "
+                    f"errors={error_count} "
+                    f"fallback_enqueued={fallback_enqueued} "
+                    f"elapsed={_duration_text(elapsed_seconds)}"
+                )
             flush_log()
+            if final_status == "cancelled":
+                raise OperationCancelled("website classification cancelled")
             return {
                 "batch_id": batch_id,
                 "requested": total_requested,

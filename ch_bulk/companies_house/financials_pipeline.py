@@ -26,6 +26,7 @@ from ch_bulk.companies_house.financials_contracts import (
     ParserProcessHandle,
     ParserProcessResponse,
 )
+from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.companies_house.financials_fetch import (
     CH_WINDOW_SECONDS,
     EFFECTIVE_CH_MAX_REQUESTS,
@@ -139,6 +140,7 @@ def enrich_financials(
     workers: int = DEFAULT_WORKERS,
     parser_workers: int = DEFAULT_PARSER_WORKERS,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, object]:
     validated_mode = _validated_mode(mode)
     validated_workers = _validated_workers(workers)
@@ -181,6 +183,7 @@ def enrich_financials(
     queue_maxsize = 0
     parser_worker_count = 0
     parser_future_limit = 0
+    cancellation_finalized = False
 
     replayed_fetch_rows = replay_financials_fetch_staging(data_dir)
     load_financials_staging(data_dir, db_path)
@@ -301,6 +304,10 @@ def enrich_financials(
         if shutdown_reason["value"] is None:
             shutdown_reason["value"] = reason
 
+    def note_external_cancel() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            request_shutdown("cancelled")
+
     def note_shutdown_if_needed() -> None:
         nonlocal shutdown_logged
         if shutdown_event.is_set() and not shutdown_logged and run_log is not None:
@@ -394,6 +401,7 @@ def enrich_financials(
     def enqueue_input_item(item: FinancialTarget | None) -> bool:
         assert input_queue is not None
         while True:
+            note_external_cancel()
             if shutdown_event.is_set():
                 return False
             try:
@@ -428,6 +436,7 @@ def enrich_financials(
                 throttle=throttle,
             ) as client:
                 while True:
+                    note_external_cancel()
                     if shutdown_event.is_set():
                         break
                     try:
@@ -436,21 +445,25 @@ def enrich_financials(
                         continue
                     if item is None:
                         break
-                    if shutdown_event.is_set():
+                    fetch_kwargs: dict[str, object] = {
+                        "client": client,
+                        "target": item,
+                        "data_dir": data_dir,
+                    }
+                    if cancel_event is not None:
+                        fetch_kwargs["cancel_event"] = cancel_event
+                    try:
+                        work_item = _fetch_company_work_item(**fetch_kwargs)
+                    except OperationCancelled:
+                        request_shutdown("cancelled")
                         break
-                    work_item = _fetch_company_work_item(
-                        client,
-                        target=item,
-                        data_dir=data_dir,
-                    )
                     record_fetched_row(work_item.row)
                     while True:
                         try:
                             fetched_queue.put(work_item, timeout=0.25)
                             break
                         except queue.Full:
-                            if shutdown_event.is_set():
-                                break
+                            note_external_cancel()
         except BaseException as exc:
             record_worker_failure(exc)
         finally:
@@ -470,6 +483,7 @@ def enrich_financials(
     def input_feeder() -> None:
         try:
             for target in targets:
+                note_external_cancel()
                 if not enqueue_input_item(target):
                     return
             for _ in range(worker_count):
@@ -488,6 +502,7 @@ def enrich_financials(
                 connection_to_handle[handle.connection] = handle
 
             while True:
+                note_external_cancel()
                 idle_handles = [
                     handle
                     for handle in parser_processes
@@ -537,6 +552,7 @@ def enrich_financials(
                                 result_queue.put(result, timeout=0.25)
                                 break
                             except queue.Full:
+                                note_external_cancel()
                                 continue
 
                 if fetch_complete and not any(
@@ -563,6 +579,7 @@ def enrich_financials(
                     result_queue.put(None, timeout=0.25)
                     break
                 except queue.Full:
+                    note_external_cancel()
                     continue
 
     threads: list[threading.Thread] = []
@@ -611,6 +628,7 @@ def enrich_financials(
         parser_finished = False
         assert result_queue is not None
         while not parser_finished:
+            note_external_cancel()
             if worker_failures and pending_failure is None:
                 pending_failure = worker_failures[0]
             try:
@@ -651,6 +669,30 @@ def enrich_financials(
             raise worker_failures[0]
 
         maybe_log_pipeline_heartbeat(force=True)
+        if shutdown_reason["value"] == "cancelled":
+            checkpoint_write_phase()
+            load_summary = load_financials_staging(
+                data_dir,
+                db_path,
+                batch_id=batch_id,
+                final_status="cancelled",
+            )
+            _archive_financials_fetch_manifest(
+                data_dir,
+                batch_id=batch_id,
+            )
+            elapsed_seconds = time.monotonic() - started_monotonic
+            run_log.write_line(
+                "cancelled "
+                f"requested={total_requested} "
+                f"records_fetched={load_summary['records_fetched']} "
+                f"records_updated={load_summary['records_updated']} "
+                f"errors={load_summary['error_count']} "
+                f"elapsed={_duration_text(elapsed_seconds)}"
+            )
+            run_log.flush_and_fsync()
+            cancellation_finalized = True
+            raise OperationCancelled("financials enrichment cancelled")
         if shutdown_event.is_set():
             raise KeyboardInterrupt(shutdown_reason["value"] or "shutdown requested")
         checkpoint_write_phase()
@@ -697,6 +739,62 @@ def enrich_financials(
             "log_path": str(run_log.path),
             "mode": validated_mode,
         }
+    except OperationCancelled:
+        request_shutdown("cancelled")
+        note_shutdown_if_needed()
+        for thread in threads:
+            thread.join()
+        if (
+            not cancellation_finalized
+            and batch_id is not None
+        ):
+            if run_log is not None:
+                checkpoint_write_phase()
+                maybe_log_pipeline_heartbeat(force=True)
+            if processed or fetched_count:
+                load_summary = load_financials_staging(
+                    data_dir,
+                    db_path,
+                    batch_id=batch_id,
+                    final_status="cancelled",
+                )
+                _archive_financials_fetch_manifest(
+                    data_dir,
+                    batch_id=batch_id,
+                )
+                if run_log is not None:
+                    elapsed_seconds = time.monotonic() - started_monotonic
+                    run_log.write_line(
+                        "cancelled "
+                        f"requested={total_requested} "
+                        f"records_fetched={load_summary['records_fetched']} "
+                        f"records_updated={load_summary['records_updated']} "
+                        f"errors={load_summary['error_count']} "
+                        f"elapsed={_duration_text(elapsed_seconds)}"
+                    )
+                    run_log.flush_and_fsync()
+            else:
+                def mark_cancelled(con: duckdb.DuckDBPyConnection) -> None:
+                    ensure_pipeline_schema(con)
+                    finish_sync_batch(
+                        con,
+                        batch_id,
+                        status="cancelled",
+                        records_fetched=0,
+                        records_updated=0,
+                        error_count=0,
+                    )
+
+                with_duckdb_connection(db_path, mark_cancelled)
+                if run_log is not None:
+                    elapsed_seconds = time.monotonic() - started_monotonic
+                    run_log.write_line(
+                        "cancelled "
+                        "requested=0 records_fetched=0 records_updated=0 errors=0 "
+                        f"elapsed={_duration_text(elapsed_seconds)}"
+                    )
+                    run_log.flush_and_fsync()
+        raise
     except BaseException:
         request_shutdown(shutdown_reason["value"] or "exception")
         note_shutdown_if_needed()

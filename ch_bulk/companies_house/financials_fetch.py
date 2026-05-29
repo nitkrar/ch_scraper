@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from ch_bulk.companies_house.financials_contracts import (
     PDF_EXTENSION,
     PDF_RESOURCE,
 )
+from ch_bulk.core.cancellation import OperationCancelled, cancellable_sleep
 from ch_bulk.companies_house.financials_parsers import _parse_date
 from ch_bulk.core.paths import raw_filings_dir
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
@@ -76,9 +78,13 @@ class CompaniesHouseFinancialsClient:
         headers: dict[str, str] | None = None,
         allow_redirects: bool = True,
         auth: bool = True,
+        cancel_event: threading.Event | None = None,
     ) -> requests.Response:
         for attempt in range(5):
-            self._throttle.wait()
+            if cancel_event is None:
+                self._throttle.wait()
+            else:
+                self._throttle.wait(cancel_event=cancel_event)
             response = self._session.get(
                 url,
                 params=params,
@@ -98,7 +104,12 @@ class CompaniesHouseFinancialsClient:
                 except ValueError:
                     pause = DEFAULT_RETRY_AFTER_SECONDS
                 logger.warning("Companies House 429 for %s, sleeping %ss", url, pause)
-                time.sleep(pause)
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"financials request cancelled: {url}",
+                    sleep_fn=time.sleep,
+                )
                 continue
             if response.status_code in {502, 503, 504}:
                 pause = 2**attempt
@@ -108,7 +119,12 @@ class CompaniesHouseFinancialsClient:
                     url,
                     pause,
                 )
-                time.sleep(pause)
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"financials request cancelled: {url}",
+                    sleep_fn=time.sleep,
+                )
                 continue
             response.raise_for_status()
             return response
@@ -117,18 +133,30 @@ class CompaniesHouseFinancialsClient:
     def get_filing_history(
         self,
         company_number: str,
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
+        request_kwargs: dict[str, object] = {
+            "params": {"category": "accounts", "items_per_page": 100}
+        }
+        if cancel_event is not None:
+            request_kwargs["cancel_event"] = cancel_event
         response = self._get(
             f"{CH_API_BASE}/company/{company_number}/filing-history",
-            params={"category": "accounts", "items_per_page": 100},
+            **request_kwargs,
         )
         return dict(response.json())
 
     def get_document_metadata(
         self,
         document_metadata_url: str,
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
-        response = self._get(document_metadata_url)
+        if cancel_event is None:
+            response = self._get(document_metadata_url)
+        else:
+            response = self._get(document_metadata_url, cancel_event=cancel_event)
         return dict(response.json())
 
     def _response_bytes_with_retries(
@@ -136,6 +164,7 @@ class CompaniesHouseFinancialsClient:
         *,
         url: str,
         request_factory: Any,
+        cancel_event: threading.Event | None = None,
     ) -> bytes:
         for attempt in range(5):
             try:
@@ -154,7 +183,12 @@ class CompaniesHouseFinancialsClient:
                     type(exc).__name__,
                     pause,
                 )
-                time.sleep(pause)
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"financials document retry cancelled: {url}",
+                    sleep_fn=time.sleep,
+                )
         raise RuntimeError(f"Document download failed after retries: {url}")
 
     def download_document(
@@ -162,12 +196,15 @@ class CompaniesHouseFinancialsClient:
         *,
         document_url: str,
         accept: str,
+        cancel_event: threading.Event | None = None,
     ) -> bytes:
-        response = self._get(
-            document_url,
-            headers={"Accept": accept},
-            allow_redirects=False,
-        )
+        request_kwargs: dict[str, object] = {
+            "headers": {"Accept": accept},
+            "allow_redirects": False,
+        }
+        if cancel_event is not None:
+            request_kwargs["cancel_event"] = cancel_event
+        response = self._get(document_url, **request_kwargs)
         if response.status_code in {301, 302, 303, 307, 308}:
             redirect_url = response.headers.get("Location")
             if not redirect_url:
@@ -178,6 +215,7 @@ class CompaniesHouseFinancialsClient:
                     redirect_url,
                     timeout=60,
                 ),
+                cancel_event=cancel_event,
             )
         response_holder = [response]
         return self._response_bytes_with_retries(
@@ -189,8 +227,10 @@ class CompaniesHouseFinancialsClient:
                     document_url,
                     headers={"Accept": accept},
                     allow_redirects=False,
+                    **({"cancel_event": cancel_event} if cancel_event is not None else {}),
                 )
             ),
+            cancel_event=cancel_event,
         )
 
     def download_document_content(
@@ -198,11 +238,15 @@ class CompaniesHouseFinancialsClient:
         *,
         document_metadata_url: str,
         accept: str,
+        cancel_event: threading.Event | None = None,
     ) -> bytes:
-        return self.download_document(
-            document_url=f"{document_metadata_url.rstrip('/')}/content",
-            accept=accept,
-        )
+        request_kwargs: dict[str, object] = {
+            "document_url": f"{document_metadata_url.rstrip('/')}/content",
+            "accept": accept,
+        }
+        if cancel_event is not None:
+            request_kwargs["cancel_event"] = cancel_event
+        return self.download_document(**request_kwargs)
 
 
 def _http_status_from_exception(exc: requests.HTTPError) -> int | None:
@@ -412,11 +456,18 @@ def _fetch_company_work_item(
     *,
     target: FinancialTarget,
     data_dir: str | Path,
+    cancel_event: threading.Event | None = None,
 ) -> FetchedFinancialWorkItem:
     started = time.monotonic()
     http_status: int | None = None
     try:
-        filing_history = client.get_filing_history(target.company_number)
+        if cancel_event is None:
+            filing_history = client.get_filing_history(target.company_number)
+        else:
+            filing_history = client.get_filing_history(
+                target.company_number,
+                cancel_event=cancel_event,
+            )
         http_status = 200
         filing = _select_latest_annual_accounts(filing_history)
         if filing is None:
@@ -436,10 +487,13 @@ def _fetch_company_work_item(
 
         if filing.paper_filed:
             try:
-                content = client.download_document_content(
-                    document_metadata_url=filing.document_metadata_url,
-                    accept=PDF_RESOURCE,
-                )
+                request_kwargs: dict[str, object] = {
+                    "document_metadata_url": filing.document_metadata_url,
+                    "accept": PDF_RESOURCE,
+                }
+                if cancel_event is not None:
+                    request_kwargs["cancel_event"] = cancel_event
+                content = client.download_document_content(**request_kwargs)
             except requests.HTTPError as exc:
                 http_status = _http_status_from_exception(exc) or http_status
                 return FetchedFinancialWorkItem(
@@ -481,18 +535,24 @@ def _fetch_company_work_item(
             )
 
         try:
-            content = client.download_document_content(
-                document_metadata_url=filing.document_metadata_url,
-                accept=IXBRL_RESOURCE,
-            )
+            request_kwargs: dict[str, object] = {
+                "document_metadata_url": filing.document_metadata_url,
+                "accept": IXBRL_RESOURCE,
+            }
+            if cancel_event is not None:
+                request_kwargs["cancel_event"] = cancel_event
+            content = client.download_document_content(**request_kwargs)
         except requests.HTTPError as exc:
             http_status = _http_status_from_exception(exc) or http_status
             if http_status == 406:
                 try:
-                    content = client.download_document_content(
-                        document_metadata_url=filing.document_metadata_url,
-                        accept=PDF_RESOURCE,
-                    )
+                    request_kwargs = {
+                        "document_metadata_url": filing.document_metadata_url,
+                        "accept": PDF_RESOURCE,
+                    }
+                    if cancel_event is not None:
+                        request_kwargs["cancel_event"] = cancel_event
+                    content = client.download_document_content(**request_kwargs)
                 except requests.HTTPError as pdf_exc:
                     http_status = _http_status_from_exception(pdf_exc) or http_status
                     return FetchedFinancialWorkItem(
@@ -570,6 +630,8 @@ def _fetch_company_work_item(
             http_status=http_status,
             started_monotonic=started,
         )
+    except OperationCancelled:
+        raise
     except requests.HTTPError as exc:
         http_status = _http_status_from_exception(exc) or http_status
         return FetchedFinancialWorkItem(

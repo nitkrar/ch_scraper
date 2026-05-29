@@ -24,18 +24,36 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import tkinter as tk
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from ch_bulk.api import ChBulk
+from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
+from ch_bulk.db.bootstrap import recover_interrupted_compaction
 from ch_bulk.companies_house.processor import SanityCheckError
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 50
+_TASK_PHASE_UNSET = object()
+
+
+@dataclass
+class ActiveTask:
+    task_id: str
+    label: str
+    thread: threading.Thread
+    cancel_event: threading.Event | None
+    can_cancel: bool
+    started_monotonic: float
+    last_message: str = ""
+    phase: str | None = None
 
 CH_COLUMNS = [
     ("company_number", "Company No", 90),
@@ -123,6 +141,69 @@ def _make_filter_grid_responsive(filter_frame: ttk.LabelFrame) -> None:
         col = int(info.get("column", 0))
         if col in (1, 3, 5) and info.get("sticky") in ("w", ""):
             child.grid_configure(sticky="ew")
+
+
+def _three_button_dialog(
+    parent: tk.Misc,
+    *,
+    title: str,
+    message: str,
+    buttons: tuple[str, ...],
+) -> str | None:
+    """Show a modal 3-button dialog and return the selected label."""
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.transient(parent.winfo_toplevel())
+    dialog.resizable(False, False)
+    dialog.grab_set()
+
+    result: dict[str, str | None] = {"choice": None}
+
+    def choose(choice: str | None) -> None:
+        result["choice"] = choice
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+
+    body = ttk.Frame(dialog, padding=14)
+    body.pack(fill="both", expand=True)
+
+    ttk.Label(
+        body,
+        text=message,
+        justify="left",
+        wraplength=480,
+    ).pack(fill="x")
+
+    button_row = ttk.Frame(body)
+    button_row.pack(fill="x", pady=(12, 0))
+
+    default_button: ttk.Button | None = None
+    for label in reversed(buttons):
+        btn = ttk.Button(button_row, text=label, command=lambda choice=label: choose(choice))
+        btn.pack(side="right", padx=(8, 0))
+        if label == buttons[0]:
+            default_button = btn
+
+    if default_button is not None:
+        default_button.focus_set()
+
+    dialog.bind("<Escape>", lambda _e: choose(None))
+    dialog.update_idletasks()
+
+    parent.update_idletasks()
+    x = parent.winfo_rootx() + max((parent.winfo_width() - dialog.winfo_width()) // 2, 0)
+    y = parent.winfo_rooty() + max((parent.winfo_height() - dialog.winfo_height()) // 3, 0)
+    dialog.geometry(f"+{x}+{y}")
+
+    parent.wait_window(dialog)
+    return result["choice"]
+
+
+def _phase_from_status_message(message: str) -> str | None:
+    if message.startswith("Compacting database"):
+        return "compact_database"
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -350,7 +431,7 @@ class CHPane(_PaneBase):
             self.app._set_status("A task is already running.", error=True); return
         self.app._set_status("Searching...")
         self.btn_search.configure(state="disabled"); self.btn_export.configure(state="disabled")
-        def worker():
+        def worker(cancel_event: threading.Event | None = None) -> None:
             try:
                 rows, total = self.ch.query_advanced(**self._get_filters())
                 self.app.root.after(0, lambda: self._display(rows, total))
@@ -363,7 +444,7 @@ class CHPane(_PaneBase):
             finally:
                 self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
                 self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
-        threading.Thread(target=worker, daemon=True).start()
+        self.app._register_task(worker, label="CH search", can_cancel=False)
 
     def _display(self, rows, total):
         self.total_pages = max(1, -(-total // PAGE_SIZE))
@@ -386,7 +467,7 @@ class CHPane(_PaneBase):
         for k in ("page", "page_size", "sort_by", "sort_order"):
             filters.pop(k, None)
         self.app._set_status("Exporting...")
-        def worker():
+        def worker(cancel_event: threading.Event | None = None) -> None:
             try:
                 n = self.ch.export_filtered_csv(path, **filters)
                 self.app.root.after(0, lambda: self.app._set_status(f"Exported {n:,} rows to {path}"))
@@ -394,19 +475,22 @@ class CHPane(_PaneBase):
                 logger.exception("CH export error")
                 err = f"Export error: {exc}"
                 self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
-        threading.Thread(target=worker, daemon=True).start()
+        self.app._register_task(worker, label="CH export", can_cancel=False)
 
     # ── DB tasks ──────────────────────────────────────────────────────
 
     def _on_sync(self) -> None:
         self.app._dispatch_with_sanity(
-            lambda force: self.ch.sync(force=force),
+            lambda force, cancel_event=None: self.ch.sync(
+                force=force,
+                cancel_event=cancel_event,
+            ),
             success_msg=lambda n: f"CH sync complete: {n:,} companies",
             label="CH syncing...",
         )
 
     def _on_download(self) -> None:
-        def worker() -> None:
+        def worker(cancel_event: threading.Event | None = None) -> None:
             try:
                 csv_files = self.ch.download(progress_callback=self.app._progress_cb)
                 self.app._progress_cb(f"CH download complete: {len(csv_files)} files")
@@ -419,7 +503,11 @@ class CHPane(_PaneBase):
 
     def _on_process(self) -> None:
         self.app._dispatch_with_sanity(
-            lambda force: self.ch.process(progress_callback=self.app._progress_cb, force=force),
+            lambda force, cancel_event=None: self.ch.process(
+                progress_callback=self.app._progress_cb,
+                force=force,
+                cancel_event=cancel_event,
+            ),
             success_msg=lambda n: f"CH process complete: {n:,} companies",
             label="CH processing...",
         )
@@ -761,7 +849,7 @@ class CQCPane(_PaneBase):
             self.app._set_status("A task is already running.", error=True); return
         self.app._set_status("Searching...")
         self.btn_search.configure(state="disabled"); self.btn_export.configure(state="disabled")
-        def worker():
+        def worker(cancel_event: threading.Event | None = None) -> None:
             try:
                 filters = self._get_filters()
                 if self.sub_view == "Locations":
@@ -778,7 +866,7 @@ class CQCPane(_PaneBase):
             finally:
                 self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
                 self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
-        threading.Thread(target=worker, daemon=True).start()
+        self.app._register_task(worker, label="CQC search", can_cancel=False)
 
     def _display(self, rows, total):
         self.total_pages = max(1, -(-total // PAGE_SIZE))
@@ -804,7 +892,7 @@ class CQCPane(_PaneBase):
         for k in ("page", "page_size", "sort_by", "sort_order"):
             filters.pop(k, None)
         self.app._set_status("Exporting...")
-        def worker():
+        def worker(cancel_event: threading.Event | None = None) -> None:
             try:
                 if self.sub_view == "Locations":
                     n = self.ch.export_cqc_locations_csv(path, **filters)
@@ -815,19 +903,23 @@ class CQCPane(_PaneBase):
                 logger.exception("CQC export error")
                 err = f"Export error: {exc}"
                 self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
-        threading.Thread(target=worker, daemon=True).start()
+        self.app._register_task(worker, label="CQC export", can_cancel=False)
 
     # ── DB tasks ──────────────────────────────────────────────────────
 
     def _on_sync(self) -> None:
         self.app._dispatch_with_sanity(
-            lambda force: self.ch.sync_cqc(progress_callback=self.app._progress_cb, force=force),
+            lambda force, cancel_event=None: self.ch.sync_cqc(
+                progress_callback=self.app._progress_cb,
+                force=force,
+                cancel_event=cancel_event,
+            ),
             success_msg=lambda n: f"CQC sync complete: {n:,} locations",
             label="CQC syncing...",
         )
 
     def _on_download(self) -> None:
-        def worker() -> None:
+        def worker(cancel_event: threading.Event | None = None) -> None:
             try:
                 p = self.ch.download_cqc(progress_callback=self.app._progress_cb)
                 self.app._progress_cb(f"CQC download complete: {p.name}")
@@ -840,22 +932,28 @@ class CQCPane(_PaneBase):
 
     def _on_process(self) -> None:
         self.app._dispatch_with_sanity(
-            lambda force: self.ch.process_cqc(progress_callback=self.app._progress_cb, force=force),
+            lambda force, cancel_event=None: self.ch.process_cqc(
+                progress_callback=self.app._progress_cb,
+                force=force,
+                cancel_event=cancel_event,
+            ),
             success_msg=lambda n: f"CQC process complete: {n:,} locations",
             label="CQC processing...",
         )
 
     def _on_hsca_sync(self) -> None:
         self.app._dispatch_with_sanity(
-            lambda force: self.ch.cqc_hsca_sync(
-                progress_callback=self.app._progress_cb, force=force
+            lambda force, cancel_event=None: self.ch.cqc_hsca_sync(
+                progress_callback=self.app._progress_cb,
+                force=force,
+                cancel_event=cancel_event,
             ),
             success_msg=lambda n: f"HSCA sync complete: {n:,} locations",
             label="HSCA syncing...",
         )
 
     def _on_hsca_download(self) -> None:
-        def worker() -> None:
+        def worker(cancel_event: threading.Event | None = None) -> None:
             try:
                 p = self.ch.download_hsca(progress_callback=self.app._progress_cb)
                 self.app._progress_cb(f"HSCA download complete: {p.name}")
@@ -869,8 +967,10 @@ class CQCPane(_PaneBase):
 
     def _on_hsca_process(self) -> None:
         self.app._dispatch_with_sanity(
-            lambda force: self.ch.process_hsca(
-                progress_callback=self.app._progress_cb, force=force
+            lambda force, cancel_event=None: self.ch.process_hsca(
+                progress_callback=self.app._progress_cb,
+                force=force,
+                cancel_event=cancel_event,
             ),
             success_msg=lambda n: f"HSCA process complete: {n:,} locations",
             label="HSCA processing...",
@@ -879,6 +979,7 @@ class CQCPane(_PaneBase):
     def refresh(self) -> None:
         import duckdb
         try:
+            recover_interrupted_compaction(self.ch.db_path)
             con = duckdb.connect(str(self.ch.db_path))
             try:
                 loc = con.execute("SELECT COUNT(*) FROM cqc_locations").fetchone()[0]
@@ -1026,7 +1127,10 @@ class ChBulkApp:
         self._task_running = False
         self._task_message = ""
         self._task_error: str | None = None
+        self._current_task_id: str | None = None
         self._lock = threading.Lock()
+        self._registry_lock = threading.Lock()
+        self._active_tasks: dict[str, ActiveTask] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1149,15 +1253,87 @@ class ChBulkApp:
     def _set_task_msg(self, msg: str) -> None:
         with self._lock:
             self._task_message = msg
+            task_id = self._current_task_id
+        self._update_task_state(
+            task_id,
+            last_message=msg,
+            phase=_phase_from_status_message(msg),
+        )
 
     def _set_task_error(self, msg: str) -> None:
         with self._lock:
             self._task_error = msg
             self._task_message = msg
+            task_id = self._current_task_id
+        self._update_task_state(
+            task_id,
+            last_message=msg,
+            phase=None,
+        )
 
     def _task_done(self) -> None:
         with self._lock:
             self._task_running = False
+            task_id = self._current_task_id
+            self._current_task_id = None
+        self._update_task_state(task_id, phase=None)
+
+    def _register_task(
+        self,
+        target,
+        *,
+        label: str,
+        can_cancel: bool,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[str, threading.Event | None]:
+        """Create + register a non-daemon worker thread."""
+        task_id = str(uuid.uuid4())
+        if can_cancel and cancel_event is None:
+            cancel_event = threading.Event()
+
+        def _wrapped() -> None:
+            try:
+                target(cancel_event)
+            finally:
+                with self._registry_lock:
+                    self._active_tasks.pop(task_id, None)
+
+        thread = threading.Thread(target=_wrapped, daemon=False, name=f"task-{task_id[:8]}")
+        task = ActiveTask(
+            task_id=task_id,
+            label=label,
+            thread=thread,
+            cancel_event=cancel_event,
+            can_cancel=can_cancel,
+            started_monotonic=time.monotonic(),
+            last_message=label,
+        )
+        with self._registry_lock:
+            self._active_tasks[task_id] = task
+        thread.start()
+        return task_id, cancel_event
+
+    def _active_task_snapshot(self) -> list[ActiveTask]:
+        with self._registry_lock:
+            return [task for task in self._active_tasks.values() if task.thread.is_alive()]
+
+    def _update_task_state(
+        self,
+        task_id: str | None,
+        *,
+        last_message: str | None = None,
+        phase: object = _TASK_PHASE_UNSET,
+    ) -> None:
+        if task_id is None:
+            return
+        with self._registry_lock:
+            task = self._active_tasks.get(task_id)
+            if task is None:
+                return
+            if last_message is not None:
+                task.last_message = last_message
+            if phase is not _TASK_PHASE_UNSET:
+                task.phase = phase
 
     def _disable_action_buttons(self, state: str) -> None:
         for pane in self.panes.values():
@@ -1175,7 +1351,9 @@ class ChBulkApp:
         self._disable_action_buttons("disabled")
         self.progress.pack(fill="x", padx=14, pady=2, side="bottom", before=self.task_label)
         self.progress.start(15)
-        threading.Thread(target=target, daemon=True).start()
+        task_id, _ = self._register_task(target, label=label, can_cancel=True)
+        with self._lock:
+            self._current_task_id = task_id
         self.root.after(500, self._poll_task)
 
     def _poll_task(self) -> None:
@@ -1199,10 +1377,16 @@ class ChBulkApp:
     def _dispatch_with_sanity(self, work_fn, *, success_msg, label: str) -> None:
         """Run `work_fn(force=False)` in a worker; on SanityCheckError, ask
         the user to confirm force and re-dispatch."""
-        def worker(force: bool = False):
+        def worker(
+            cancel_event: threading.Event | None = None,
+            *,
+            force: bool = False,
+        ) -> None:
             try:
-                n = work_fn(force)
+                n = work_fn(force, cancel_event=cancel_event)
                 self._progress_cb(success_msg(n))
+            except OperationCancelled as exc:
+                self._set_task_msg(str(exc) or "Cancelled")
             except SanityCheckError as exc:
                 logger.warning("Sanity check failed: %s", exc)
                 def on_main():
@@ -1218,9 +1402,18 @@ class ChBulkApp:
                             self._task_error = None
                             self._task_message = f"{label} (force)"
                         self._set_status(self._task_message)
-                        threading.Thread(
-                            target=lambda: worker(force=True), daemon=True
-                        ).start()
+                        def force_worker(
+                            force_cancel_event: threading.Event | None = None,
+                        ) -> None:
+                            worker(force_cancel_event, force=True)
+                        task_id, _ = self._register_task(
+                            force_worker,
+                            label=f"{label} (force)",
+                            can_cancel=True,
+                            cancel_event=cancel_event,
+                        )
+                        with self._lock:
+                            self._current_task_id = task_id
                         self.root.after(500, self._poll_task)
                 self.root.after(0, on_main)
                 self._set_task_msg("Cancelled (sanity check failed)")
@@ -1232,25 +1425,92 @@ class ChBulkApp:
         self._run_task(worker, label)
 
     def _on_close(self) -> None:
-        if self._task_running:
-            # Background worker (e.g. CQC ingest, HSCA process) is running.
-            # Daemon threads stuck in DuckDB native code can keep the Python
-            # process alive after root.destroy(), so ask before nuking them.
-            confirm = messagebox.askyesno(
-                "Background task running",
-                "A background task is still running and may be writing to the database.\n\n"
-                "Quitting now will force-kill it (DB may be left in a recoverable but uncompacted state).\n\n"
-                "Force quit?",
-            )
-            if not confirm:
-                return
+        active = self._active_task_snapshot()
+        if not active:
             self.root.destroy()
-            # Daemon threads blocked in DuckDB C-extension calls won't honor
-            # interpreter shutdown. os._exit is the only way to guarantee the
-            # process actually ends.
+            return
+
+        compact_active = any(task.phase == "compact_database" for task in active)
+        cancellable_count = sum(1 for task in active if task.can_cancel)
+        uncancellable_count = len(active) - cancellable_count
+        lines = [f"{len(active)} background task(s) running:"]
+        for task in active:
+            cancel_note = "" if task.can_cancel else " (cannot be cancelled)"
+            lines.append(f"  - {task.label}{cancel_note}")
+        if compact_active:
+            lines.append("")
+            lines.append(
+                "Database compaction is in the swap window and cannot be cancelled safely."
+            )
+            lines.append("")
+            lines.append("Choose: Wait, Force quit, or Cancel?")
+            buttons = ("Wait", "Force quit", "Cancel")
+        else:
+            if uncancellable_count > 0:
+                lines.append("")
+                lines.append(
+                    "Uncancellable tasks will continue until their current work finishes."
+                )
+            lines.append("")
+            lines.append("Choose: Wait for safe stop, Force quit, or Cancel?")
+            buttons = ("Wait for safe stop", "Force quit", "Cancel")
+
+        result = _three_button_dialog(
+            self.root,
+            title="Background task running",
+            message="\n".join(lines),
+            buttons=buttons,
+        )
+        if result is None or result == "Cancel":
+            return
+        if result == "Force quit":
+            self.root.destroy()
             import os
             os._exit(0)
-        self.root.destroy()
+            return
+
+        if not compact_active:
+            for task in active:
+                if task.cancel_event is not None:
+                    task.cancel_event.set()
+            self._set_status(f"Stopping {len(active)} task(s); waiting for safe stop...")
+        else:
+            self._set_status(f"Waiting for {len(active)} task(s) to finish...")
+        self._poll_shutdown(active, deadline_seconds=10.0)
+
+    def _poll_shutdown(self, active: list[ActiveTask], deadline_seconds: float) -> None:
+        deadline = time.monotonic() + deadline_seconds
+
+        def _tick() -> None:
+            alive = [task for task in active if task.thread.is_alive()]
+            if not alive:
+                self.root.destroy()
+                return
+            if time.monotonic() >= deadline:
+                uncancellable_remaining = [task for task in alive if not task.can_cancel]
+                escalation_msg = f"{len(alive)} task(s) still running after 10s."
+                if uncancellable_remaining:
+                    escalation_msg += (
+                        f" ({len(uncancellable_remaining)} cannot be interrupted.)"
+                    )
+                escalation_msg += "\n\nKeep waiting, Force quit, or Cancel?"
+                choice = _three_button_dialog(
+                    self.root,
+                    title="Shutdown timeout",
+                    message=escalation_msg,
+                    buttons=("Keep waiting", "Force quit", "Cancel"),
+                )
+                if choice == "Force quit":
+                    self.root.destroy()
+                    import os
+                    os._exit(0)
+                    return
+                if choice == "Keep waiting":
+                    self._poll_shutdown(active, deadline_seconds=10.0)
+                return
+            self.root.after(250, _tick)
+
+        _tick()
 
     def run(self) -> None:
         self.root.mainloop()

@@ -5,11 +5,14 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 
 import duckdb
 
+from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.companies_house.processor import compact_database
+from ch_bulk.db.staging import with_duckdb_connection
 
 
 def _foreign_key_refs(
@@ -249,6 +252,56 @@ class BootstrapSchemaTests(unittest.TestCase):
             self.assertEqual(row, ("prov-user", 3, 3, 2, 8, "Tier 1"))
         finally:
             con.close()
+
+    def test_with_duckdb_connection_recovers_interrupted_compaction_tmp_db(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "recovered.duckdb"
+            tmp_path = db_path.with_suffix(db_path.suffix + ".compact.tmp")
+            con = duckdb.connect(str(tmp_path))
+            try:
+                con.execute("CREATE TABLE demo(value INTEGER)")
+                con.execute("INSERT INTO demo VALUES (7)")
+            finally:
+                con.close()
+
+            value = with_duckdb_connection(
+                db_path,
+                lambda con: con.execute("SELECT value FROM demo").fetchone()[0],
+                read_only=True,
+            )
+
+            self.assertEqual(value, 7)
+            self.assertTrue(db_path.exists())
+            self.assertFalse(tmp_path.exists())
+
+    def test_compact_database_honours_pre_swap_cancel(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "cancelled.duckdb"
+            con = duckdb.connect(str(db_path))
+            try:
+                con.execute("CREATE TABLE demo(value INTEGER)")
+                con.execute("INSERT INTO demo VALUES (1)")
+            finally:
+                con.close()
+
+            cancel_event = Event()
+            cancel_event.set()
+            with self.assertRaises(OperationCancelled):
+                compact_database(db_path, cancel_event=cancel_event)
+
+            self.assertTrue(db_path.exists())
+            self.assertFalse(
+                db_path.with_suffix(db_path.suffix + ".compact.tmp").exists()
+            )
+
+            con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                self.assertEqual(
+                    con.execute("SELECT value FROM demo").fetchone()[0],
+                    1,
+                )
+            finally:
+                con.close()
 
     def test_company_websites_allows_many_false_rows_but_only_one_primary(self):
         con = duckdb.connect()

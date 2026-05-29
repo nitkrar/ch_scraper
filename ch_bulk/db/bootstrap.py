@@ -23,6 +23,19 @@ SCHEMA_FILES = [
     SQL_DIR / "cqc" / "bootstrap_hsca_dual_registrations.sql",
     SQL_DIR / "bootstrap_pipeline.sql",
 ]
+
+
+def recover_interrupted_compaction(db_path: str | Path) -> None:
+    """Restore a temp compacted DB if the canonical file is missing."""
+    db_path = Path(db_path)
+    tmp_db = db_path.with_suffix(db_path.suffix + ".compact.tmp")
+    if tmp_db.exists() and not db_path.exists():
+        logger.warning(
+            "Recovering interrupted compaction: renaming %s -> %s",
+            tmp_db,
+            db_path,
+        )
+        tmp_db.rename(db_path)
 VIEWS_FILE = SQL_DIR / "macros_and_views.sql"
 
 

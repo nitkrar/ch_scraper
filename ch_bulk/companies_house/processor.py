@@ -19,6 +19,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -28,7 +29,9 @@ from typing import Callable, TypeVar
 import duckdb
 from rich.console import Console
 
+from ch_bulk.core.cancellation import OperationCancelled, raise_if_cancelled
 from ch_bulk.core.paths import SQL_DIR as _ROOT_SQL_DIR
+from ch_bulk.db.bootstrap import recover_interrupted_compaction
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -458,6 +461,7 @@ def process_csvs(
     force: bool = False,
     scrape_date_override: date | None = None,
     compact: bool = True,
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """Ingest CSV files into the DuckDB database via the upsert pipeline.
 
@@ -495,6 +499,7 @@ def process_csvs(
     """
     csv_files = [Path(f) for f in csv_files]
     db_path = Path(db_path)
+    recover_interrupted_compaction(db_path)
 
     for f in csv_files:
         if not f.exists():
@@ -550,11 +555,14 @@ def process_csvs(
     t_total = time.perf_counter()
     con = duckdb.connect(str(db_path))
     try:
+        raise_if_cancelled(cancel_event, reason="CH bulk processing cancelled")
         _do_ingest(con)
 
+        raise_if_cancelled(cancel_event, reason="CH bulk processing cancelled")
         result = _do_sanity(con)
         _enforce_sanity(result, force=force)
 
+        raise_if_cancelled(cancel_event, reason="CH bulk processing cancelled")
         if not result.companies_exists:
             _do_bootstrap(con)
         else:
@@ -564,6 +572,7 @@ def process_csvs(
             )
             _do_upsert(con)
 
+        raise_if_cancelled(cancel_event, reason="CH bulk processing cancelled")
         _do_indexes(con)
 
         con.execute("DROP TABLE IF EXISTS companies_staging")
@@ -589,7 +598,12 @@ def process_csvs(
         con.close()
 
     if compact:
-        compact_database(db_path, progress_callback=progress_callback)
+        raise_if_cancelled(cancel_event, reason="CH bulk processing cancelled")
+        compact_database(
+            db_path,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
 
     return row_count
 
@@ -598,6 +612,7 @@ def process_csvs(
 def compact_database(
     db_path: str | Path,
     progress_callback: callable | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Reclaim disk space by rebuilding the database file.
 
@@ -617,8 +632,10 @@ def compact_database(
         FileNotFoundError: If the database does not exist.
     """
     db_path = Path(db_path)
+    recover_interrupted_compaction(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"DuckDB database not found: {db_path}")
+    raise_if_cancelled(cancel_event, reason="database compaction cancelled")
 
     # Heal the known pre-WP3 HSCA FK shape before COPY FROM DATABASE.
     # This migration is intentionally narrow and no-ops on normal CH/CQC

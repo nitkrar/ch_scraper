@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,11 @@ from typing import Literal
 
 import duckdb
 
+from ch_bulk.core.cancellation import (
+    OperationCancelled,
+    cancellable_sleep,
+    raise_if_cancelled,
+)
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
@@ -335,6 +341,7 @@ def _load_website_finder_staging_file(
     db_path: str | Path,
     *,
     path: Path,
+    final_status: str = "succeeded",
 ) -> LoadedBatch:
     batch_id = batch_id_from_staging_path(WEBSITE_FINDER_SYNC_TYPE, path)
     stats = _scan_staged_file_stats(path)
@@ -381,7 +388,7 @@ def _load_website_finder_staging_file(
                 finish_sync_batch(
                     con,
                     batch_id,
-                    status="succeeded",
+                    status=final_status,
                     records_fetched=final_records_fetched,
                     records_updated=final_records_updated,
                     error_count=final_error_count,
@@ -422,6 +429,7 @@ def load_website_finder_staging(
     db_path: str | Path,
     *,
     batch_id: str | None = None,
+    final_status: str = "succeeded",
 ) -> dict[str, object]:
     loaded: list[LoadedBatch] = []
     for path in pending_staging_files(
@@ -433,6 +441,7 @@ def load_website_finder_staging(
             _load_website_finder_staging_file(
                 db_path,
                 path=path,
+                final_status=final_status,
             )
         )
     return summarize_loaded_batches(
@@ -533,6 +542,7 @@ class WebsiteFinder:
         mode: str = "incremental",
         ids: list[str] | None = None,
         pause_seconds: float = DEFAULT_PAUSE_SECONDS,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         validated_mode = _validated_mode(mode)
         validated_pause_seconds = _validated_pause_seconds(pause_seconds)
@@ -673,6 +683,10 @@ class WebsiteFinder:
             )
 
             for index, target in enumerate(targets, start=1):
+                raise_if_cancelled(
+                    cancel_event,
+                    reason="website finder cancelled",
+                )
                 fetched_at = isoformat_utc()
                 status = "error"
                 picked_reason = "search_error"
@@ -696,6 +710,8 @@ class WebsiteFinder:
                         status = "ok"
                     else:
                         status = "no_match"
+                except OperationCancelled:
+                    raise
                 except Exception as exc:
                     logger.exception(
                         "DDG website search failed for company %s",
@@ -733,8 +749,17 @@ class WebsiteFinder:
                 run_log.flush_and_fsync()
 
                 if index < len(targets) and validated_pause_seconds > 0:
-                    time.sleep(validated_pause_seconds)
+                    cancellable_sleep(
+                        cancel_event,
+                        validated_pause_seconds,
+                        reason="website finder pause cancelled",
+                        sleep_fn=time.sleep,
+                    )
 
+            raise_if_cancelled(
+                cancel_event,
+                reason="website finder cancelled",
+            )
             load_attempted = True
             load_summary = load_website_finder_staging(
                 self.data_dir,
@@ -779,6 +804,51 @@ class WebsiteFinder:
                 "log_path": str(run_log.path),
                 "resumed": resumed,
             }
+        except OperationCancelled:
+            if staging_writer is not None:
+                staging_writer.flush_and_fsync()
+            if batch_id is not None:
+                if total_fetched > 0:
+                    load_attempted = True
+                    load_summary = load_website_finder_staging(
+                        self.data_dir,
+                        self.db_path,
+                        batch_id=batch_id,
+                        final_status="cancelled",
+                    )
+                    if run_log is not None:
+                        elapsed_seconds = time.monotonic() - started_monotonic
+                        run_log.write_line(
+                            "cancelled "
+                            f"requested={prior_processed + len(targets)} "
+                            f"records_fetched={load_summary['records_fetched']} "
+                            f"records_updated={load_summary['records_updated']} "
+                            f"no_match={load_summary.get('no_match_count', 0)} "
+                            f"errors={load_summary['error_count']} "
+                            f"elapsed={_duration_text(elapsed_seconds)}"
+                        )
+                        run_log.flush_and_fsync()
+                else:
+                    def mark_cancelled(con: duckdb.DuckDBPyConnection) -> None:
+                        finish_sync_batch(
+                            con,
+                            batch_id,
+                            status="cancelled",
+                            records_fetched=0,
+                            records_updated=0,
+                            error_count=0,
+                        )
+
+                    with_duckdb_connection(self.db_path, mark_cancelled)
+                    if run_log is not None:
+                        elapsed_seconds = time.monotonic() - started_monotonic
+                        run_log.write_line(
+                            "cancelled "
+                            "records_fetched=0 records_updated=0 no_match=0 errors=0 "
+                            f"elapsed={_duration_text(elapsed_seconds)}"
+                        )
+                        run_log.flush_and_fsync()
+            raise
         except BaseException:
             if staging_writer is not None:
                 staging_writer.flush_and_fsync()

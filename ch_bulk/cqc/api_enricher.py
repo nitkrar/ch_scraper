@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Literal
 
 import duckdb
 
+from ch_bulk.core.cancellation import OperationCancelled, raise_if_cancelled
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
@@ -580,6 +582,7 @@ def _load_cqc_staging_file(
     *,
     sync_type: str,
     path: Path,
+    final_status: str = "succeeded",
 ) -> LoadedBatch:
     batch_id = batch_id_from_staging_path(sync_type, path)
 
@@ -669,7 +672,7 @@ def _load_cqc_staging_file(
                 finish_sync_batch(
                     con,
                     batch_id,
-                    status="succeeded",
+                    status=final_status,
                     records_fetched=final_records_fetched,
                     records_updated=final_records_updated,
                     error_count=final_error_count,
@@ -710,6 +713,7 @@ def load_cqc_staging(
     *,
     sync_type: str,
     batch_id: str | None = None,
+    final_status: str = "succeeded",
 ) -> dict[str, object]:
     loaded: list[LoadedBatch] = []
     for path in pending_staging_files(
@@ -722,6 +726,7 @@ def load_cqc_staging(
                 db_path,
                 sync_type=sync_type,
                 path=path,
+                final_status=final_status,
             )
         )
     return summarize_loaded_batches(
@@ -776,12 +781,14 @@ class CQCAPIEnricher:
         mode: str = "incremental",
         ids: list[str] | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         return self._enrich(
             entity_type="provider",
             mode=_validated_mode(mode),
             ids=ids,
             batch_size=_validated_batch_size(batch_size),
+            cancel_event=cancel_event,
         )
 
     def enrich_locations(
@@ -790,12 +797,14 @@ class CQCAPIEnricher:
         mode: str = "incremental",
         ids: list[str] | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         return self._enrich(
             entity_type="location",
             mode=_validated_mode(mode),
             ids=ids,
             batch_size=_validated_batch_size(batch_size),
+            cancel_event=cancel_event,
         )
 
     def _select_entity_ids(
@@ -860,6 +869,7 @@ class CQCAPIEnricher:
         mode: Mode,
         ids: list[str] | None,
         batch_size: int,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         batch_id: str | None = None
@@ -971,14 +981,30 @@ class CQCAPIEnricher:
 
             with CQCAPIClient(self.data_dir) as client:
                 for entity_id in target_ids:
+                    raise_if_cancelled(
+                        cancel_event,
+                        reason=f"CQC {entity_type} enrichment cancelled",
+                    )
                     status = "error"
                     http_status: int | None = None
                     try:
                         response: APIResult
                         if entity_type == "provider":
-                            response = client.get_provider(entity_id)
+                            if cancel_event is None:
+                                response = client.get_provider(entity_id)
+                            else:
+                                response = client.get_provider(
+                                    entity_id,
+                                    cancel_event=cancel_event,
+                                )
                         else:
-                            response = client.get_location(entity_id)
+                            if cancel_event is None:
+                                response = client.get_location(entity_id)
+                            else:
+                                response = client.get_location(
+                                    entity_id,
+                                    cancel_event=cancel_event,
+                                )
 
                         http_status = response.status_code
                         staging_writer.append(
@@ -998,6 +1024,8 @@ class CQCAPIEnricher:
                             status = "skip" if response.status_code == 404 else "error"
                         else:
                             status = "ok"
+                    except OperationCancelled:
+                        raise
                     except Exception:
                         total_errors += 1
                         logger.exception(
@@ -1021,6 +1049,10 @@ class CQCAPIEnricher:
                     if staged_since_sync >= batch_size:
                         checkpoint_write_phase()
 
+            raise_if_cancelled(
+                cancel_event,
+                reason=f"CQC {entity_type} enrichment cancelled",
+            )
             checkpoint_write_phase()
             load_summary = load_cqc_staging(
                 self.data_dir,
@@ -1059,6 +1091,50 @@ class CQCAPIEnricher:
                 "mode": mode,
                 "log_path": str(run_log.path),
             }
+        except OperationCancelled:
+            if staging_writer is not None:
+                staging_writer.flush_and_fsync()
+            if batch_id is not None:
+                if total_fetched > 0:
+                    load_summary = load_cqc_staging(
+                        self.data_dir,
+                        self.db_path,
+                        sync_type=sync_type,
+                        batch_id=batch_id,
+                        final_status="cancelled",
+                    )
+                    if run_log is not None:
+                        elapsed_seconds = time.monotonic() - started_monotonic
+                        run_log.write_line(
+                            "cancelled "
+                            f"requested={len(target_ids)} "
+                            f"records_fetched={load_summary['records_fetched']} "
+                            f"records_updated={load_summary['records_updated']} "
+                            f"errors={load_summary['error_count']} "
+                            f"elapsed={_duration_text(elapsed_seconds)}"
+                        )
+                        run_log.flush_and_fsync()
+                else:
+                    def mark_cancelled(con: duckdb.DuckDBPyConnection) -> None:
+                        finish_sync_batch(
+                            con,
+                            batch_id,
+                            status="cancelled",
+                            records_fetched=0,
+                            records_updated=0,
+                            error_count=0,
+                        )
+
+                    with_duckdb_connection(self.db_path, mark_cancelled)
+                    if run_log is not None:
+                        elapsed_seconds = time.monotonic() - started_monotonic
+                        run_log.write_line(
+                            "cancelled "
+                            "requested=0 records_fetched=0 records_updated=0 errors=0 "
+                            f"elapsed={_duration_text(elapsed_seconds)}"
+                        )
+                        run_log.flush_and_fsync()
+            raise
         except BaseException:
             if staging_writer is not None:
                 staging_writer.flush_and_fsync()

@@ -598,6 +598,7 @@ def load_financials_staging(
     db_path: str | Path,
     *,
     batch_id: str | None = None,
+    final_status: str = "succeeded",
 ) -> dict[str, object]:
     results: list[LoadedBatch] = []
     with_duckdb_connection(db_path, ensure_pipeline_schema)
@@ -624,7 +625,7 @@ def load_financials_staging(
             _load_financials_staging_file(
                 db_path,
                 path=path,
-                final_status="failed" if recovered_stale_batch else "succeeded",
+                final_status="failed" if recovered_stale_batch else final_status,
             )
         )
 
