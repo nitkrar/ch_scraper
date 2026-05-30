@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS cqc_hsca_locations (
     st_care_home_without_nursing BOOLEAN,
     st_extra_care_housing_services BOOLEAN,
     st_hospice_services_at_home BOOLEAN,
+    service_user_bands JSON,
+    regulated_activities JSON,
     bulk_imported_at TIMESTAMP NOT NULL,
     bulk_file_date DATE NOT NULL,
     raw_row JSON NOT NULL

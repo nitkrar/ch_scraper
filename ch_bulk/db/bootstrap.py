@@ -176,6 +176,65 @@ def repair_pipeline_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("DROP TABLE cqc_hsca_dual_registrations_backup")
 
 
+def ensure_enrichment_columns(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure additive enrichment columns exist on older databases."""
+    _ensure_column(
+        con,
+        table_name="company_enrichment",
+        column_name="total_active_directors",
+        column_type="INTEGER",
+    )
+    _ensure_column(
+        con,
+        table_name="company_enrichment",
+        column_name="directors",
+        column_type="JSON",
+    )
+    for table_name in ("cqc_providers_enriched", "cqc_locations_enriched"):
+        _ensure_column(
+            con,
+            table_name=table_name,
+            column_name="rating_safe",
+            column_type="TEXT",
+        )
+        _ensure_column(
+            con,
+            table_name=table_name,
+            column_name="rating_effective",
+            column_type="TEXT",
+        )
+        _ensure_column(
+            con,
+            table_name=table_name,
+            column_name="rating_caring",
+            column_type="TEXT",
+        )
+        _ensure_column(
+            con,
+            table_name=table_name,
+            column_name="rating_responsive",
+            column_type="TEXT",
+        )
+        _ensure_column(
+            con,
+            table_name=table_name,
+            column_name="rating_well_led",
+            column_type="TEXT",
+        )
+    _ensure_column(
+        con,
+        table_name="cqc_hsca_locations",
+        column_name="service_user_bands",
+        column_type="JSON",
+    )
+    _ensure_column(
+        con,
+        table_name="cqc_hsca_locations",
+        column_name="regulated_activities",
+        column_type="JSON",
+    )
+
+
 def ensure_pipeline_schema(con: duckdb.DuckDBPyConnection) -> None:
     """Create the homecare pipeline schema objects if they are missing.
 
@@ -288,6 +347,7 @@ def ensure_pipeline_schema(con: duckdb.DuckDBPyConnection) -> None:
             column_name="filing_age_months",
             column_type="INTEGER",
         )
+        ensure_enrichment_columns(con)
 
         if _table_exists(con, "companies"):
             logger.info("Applying macros/views SQL: %s", VIEWS_FILE.name)

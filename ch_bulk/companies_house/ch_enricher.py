@@ -57,6 +57,8 @@ COMPANY_ENRICHMENT_COLUMNS = [
     "directors_over_60",
     "all_directors_60_plus",
     "directors_dob_years",
+    "total_active_directors",
+    "directors",
     "revenue",
     "revenue_source",
     "employee_count",
@@ -205,15 +207,22 @@ class CompaniesHouseClient:
         return payload.get("items", [])
 
 
-def compute_age_fields(officers: list[dict], current_year: int) -> dict[str, object]:
-    years: list[int] = []
-    ages: list[int] = []
+def _active_director_officers(officers: list[dict]) -> list[dict]:
+    active: list[dict] = []
     for officer in officers:
         if officer.get("resigned_on"):
             continue
         role = str(officer.get("officer_role") or "").lower()
         if "director" not in role:
             continue
+        active.append(officer)
+    return active
+
+
+def compute_age_fields(officers: list[dict], current_year: int) -> dict[str, object]:
+    years: list[int] = []
+    ages: list[int] = []
+    for officer in _active_director_officers(officers):
         dob = officer.get("date_of_birth") or {}
         year = _coerce_int(dob.get("year"))
         if year is None:
@@ -241,6 +250,46 @@ def compute_age_fields(officers: list[dict], current_year: int) -> dict[str, obj
     }
 
 
+def compute_director_meta(officers: list[dict]) -> dict[str, object]:
+    directors = [
+        {
+            "name": officer.get("name"),
+            "officer_role": officer.get("officer_role"),
+            "appointed_on": officer.get("appointed_on"),
+        }
+        for officer in _active_director_officers(officers)
+    ]
+    return {
+        "total_active_directors": len(directors),
+        "directors": directors,
+    }
+
+
+def _apply_director_enrichment_fields(
+    target_row: dict[str, object],
+    officers: list[dict],
+    *,
+    current_year: int,
+    enriched_at,
+) -> dict[str, object]:
+    age_fields = compute_age_fields(officers, current_year)
+    director_meta = compute_director_meta(officers)
+    target_row.update(
+        {
+            "avg_director_age": age_fields["avg_director_age"],
+            "min_director_age": age_fields["min_director_age"],
+            "max_director_age": age_fields["max_director_age"],
+            "directors_over_60": age_fields["directors_over_60"],
+            "all_directors_60_plus": age_fields["all_directors_60_plus"],
+            "directors_dob_years": _json_text(age_fields["directors_dob_years"]),
+            "total_active_directors": director_meta["total_active_directors"],
+            "directors": _json_text(director_meta["directors"]),
+            "last_enriched_at": enriched_at,
+        }
+    )
+    return age_fields
+
+
 def _base_company_enrichment_row(company_number: str) -> dict[str, object]:
     return {
         "company_number": company_number,
@@ -250,6 +299,8 @@ def _base_company_enrichment_row(company_number: str) -> dict[str, object]:
         "directors_over_60": None,
         "all_directors_60_plus": None,
         "directors_dob_years": None,
+        "total_active_directors": None,
+        "directors": None,
         "revenue": None,
         "revenue_source": None,
         "employee_count": None,
@@ -284,6 +335,8 @@ def _load_existing_company_enrichment(
             directors_over_60,
             all_directors_60_plus,
             directors_dob_years,
+            total_active_directors,
+            directors,
             revenue,
             revenue_source,
             employee_count,
@@ -337,6 +390,8 @@ def _load_existing_company_enrichment_rows(
             directors_over_60,
             all_directors_60_plus,
             directors_dob_years,
+            total_active_directors,
+            directors,
             revenue,
             revenue_source,
             employee_count,
@@ -381,7 +436,7 @@ def _insert_or_replace_company_enrichment(
     row: dict[str, object],
 ) -> None:
     placeholders = [
-        "CAST(? AS JSON)" if column == "directors_dob_years" else "?"
+        "CAST(? AS JSON)" if column in {"directors_dob_years", "directors"} else "?"
         for column in COMPANY_ENRICHMENT_COLUMNS
     ]
     con.execute(
@@ -401,7 +456,7 @@ def _insert_or_replace_company_enrichment_rows(
         return
 
     placeholders = [
-        "CAST(? AS JSON)" if column == "directors_dob_years" else "?"
+        "CAST(? AS JSON)" if column in {"directors_dob_years", "directors"} else "?"
         for column in COMPANY_ENRICHMENT_COLUMNS
     ]
     con.executemany(
@@ -461,17 +516,11 @@ def _load_company_enrichment_from_batch(
                     _base_company_enrichment_row(company_number),
                 )
             )
-            age_fields = compute_age_fields(payload, current_year)
-            target_row.update(
-                {
-                    "avg_director_age": age_fields["avg_director_age"],
-                    "min_director_age": age_fields["min_director_age"],
-                    "max_director_age": age_fields["max_director_age"],
-                    "directors_over_60": age_fields["directors_over_60"],
-                    "all_directors_60_plus": age_fields["all_directors_60_plus"],
-                    "directors_dob_years": _json_text(age_fields["directors_dob_years"]),
-                    "last_enriched_at": now,
-                }
+            age_fields = _apply_director_enrichment_fields(
+                target_row,
+                payload,
+                current_year=current_year,
+                enriched_at=now,
             )
             updated_rows.append(target_row)
             records_updated += 1
@@ -649,6 +698,78 @@ def load_director_staging(
         for result in results
     )
     return summary
+
+
+def backfill_directors(db_path: str | Path) -> dict[str, int]:
+    def run_backfill(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+        ensure_pipeline_schema(con)
+        current_year = utcnow_naive().year
+        now = utcnow_naive()
+        latest_rows = con.execute(
+            """
+            SELECT entity_id, raw_json
+            FROM (
+                SELECT
+                    entity_id,
+                    raw_json,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY entity_id
+                        ORDER BY fetched_at DESC, response_id DESC
+                    ) AS row_number
+                FROM cqc_api_responses
+                WHERE entity_type = 'ch_directors'
+                  AND http_status = 200
+            )
+            WHERE row_number = 1
+            ORDER BY entity_id
+            """
+        ).fetchall()
+        if not latest_rows:
+            return {
+                "records_updated": 0,
+                "enriched": 0,
+                "no_active_directors": 0,
+            }
+
+        company_numbers = [str(row[0]).zfill(8) for row in latest_rows]
+        existing_rows = _load_existing_company_enrichment_rows(con, company_numbers)
+        updated_rows: list[dict[str, object]] = []
+        enriched = 0
+        no_active_directors = 0
+
+        for entity_id, raw_json_text in latest_rows:
+            payload = json.loads(str(raw_json_text))
+            if not isinstance(payload, list):
+                raise ValueError(
+                    f"Expected officer list payload for company {entity_id}"
+                )
+            company_number = str(entity_id).zfill(8)
+            target_row = dict(
+                existing_rows.get(
+                    company_number,
+                    _base_company_enrichment_row(company_number),
+                )
+            )
+            age_fields = _apply_director_enrichment_fields(
+                target_row,
+                payload,
+                current_year=current_year,
+                enriched_at=now,
+            )
+            updated_rows.append(target_row)
+            if age_fields["avg_director_age"] is None:
+                no_active_directors += 1
+            else:
+                enriched += 1
+
+        _insert_or_replace_company_enrichment_rows(con, updated_rows)
+        return {
+            "records_updated": len(updated_rows),
+            "enriched": enriched,
+            "no_active_directors": no_active_directors,
+        }
+
+    return with_duckdb_connection(db_path, run_backfill)
 
 
 def _validated_batch_size(batch_size: int) -> int:

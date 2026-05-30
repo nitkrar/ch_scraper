@@ -753,3 +753,22 @@ def migration_import(
         f"tables={len(summary['row_counts'])} "
         f"force={summary['force']}"
     )
+
+
+@migration_app.command("backfill-enrichment")
+def migration_backfill_enrichment(
+    db_path: Optional[Path] = typer.Option(
+        None, "--db-path", help=DATA_DIR_DB_PATH_HELP, show_default=False
+    ),
+    data_dir: Path = typer.Option(
+        DEFAULT_DATA_DIR, "--data-dir", "-d", help="Directory containing logs/settings."
+    ),
+) -> None:
+    ch = ChBulk(data_dir=data_dir, db_path=db_path)
+    summary = ch.backfill_enrichment()
+    console.print(
+        "[bold green]Enrichment backfill complete:[/] "
+        f"directors={summary['directors_updated']} "
+        f"ratings={summary['ratings_updated']} "
+        f"hsca={summary['hsca_updated']}"
+    )

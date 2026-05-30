@@ -13,7 +13,12 @@ import duckdb
 
 from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.core.logging import setup_logging
-from ch_bulk.db.bootstrap import ensure_pipeline_schema, recover_interrupted_compaction
+from ch_bulk.db.bootstrap import (
+    ensure_enrichment_columns,
+    ensure_pipeline_schema,
+    recover_interrupted_compaction,
+)
+from ch_bulk.companies_house.ch_enricher import backfill_directors as _backfill_directors
 from ch_bulk.companies_house.ch_enricher import enrich_directors as _enrich_directors
 from ch_bulk.companies_house.ch_enricher import load_director_staging as _load_director_staging
 from ch_bulk.web.classifier import WebsiteClassifier, load_classification_staging as _load_classification_staging
@@ -28,8 +33,16 @@ from ch_bulk.core.paths import (
 from ch_bulk.companies_house.financials_enricher import enrich_financials as _enrich_financials
 from ch_bulk.companies_house.financials_enricher import load_financials_staging as _load_financials_staging
 from ch_bulk.cqc.downloader import download_cqc_directory, download_hsca_filters
-from ch_bulk.cqc.api_enricher import CQCAPIEnricher, load_cqc_staging as _load_cqc_staging
-from ch_bulk.cqc.processor import process_cqc_csv, process_hsca_filters
+from ch_bulk.cqc.api_enricher import (
+    CQCAPIEnricher,
+    backfill_cqc_ratings as _backfill_cqc_ratings,
+    load_cqc_staging as _load_cqc_staging,
+)
+from ch_bulk.cqc.processor import (
+    backfill_hsca_flags as _backfill_hsca_flags,
+    process_cqc_csv,
+    process_hsca_filters,
+)
 from ch_bulk.cqc.query import (
     export_cqc_locations_csv as _export_cqc_locations_csv,
     export_cqc_providers_csv as _export_cqc_providers_csv,
@@ -550,6 +563,25 @@ class ChBulk:
             self.db_path,
             force=force,
         )
+
+    def backfill_enrichment(self) -> dict[str, int]:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        recover_interrupted_compaction(self.db_path)
+        con = duckdb.connect(str(self.db_path))
+        try:
+            ensure_pipeline_schema(con)
+            ensure_enrichment_columns(con)
+        finally:
+            con.close()
+
+        directors_summary = _backfill_directors(self.db_path)
+        ratings_summary = _backfill_cqc_ratings(self.db_path)
+        hsca_summary = _backfill_hsca_flags(self.db_path)
+        return {
+            "directors_updated": int(directors_summary["records_updated"]),
+            "ratings_updated": int(ratings_summary["records_updated"]),
+            "hsca_updated": int(hsca_summary["records_updated"]),
+        }
 
     def load_staging(
         self,

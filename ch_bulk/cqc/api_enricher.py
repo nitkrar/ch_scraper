@@ -44,6 +44,50 @@ logger = logging.getLogger(__name__)
 Mode = Literal["incremental", "all", "list"]
 INCREMENTAL_LOOKBACK_DAYS = 30
 DEFAULT_BATCH_SIZE = 1000
+KEY_QUESTION_RATING_FIELDS = [
+    ("rating_safe", "safe"),
+    ("rating_effective", "effective"),
+    ("rating_caring", "caring"),
+    ("rating_responsive", "responsive"),
+    ("rating_well_led", "well-led"),
+]
+
+
+def _key_question_rating_sql(
+    json_expr: str,
+    json_path: str,
+    rating_name: str,
+) -> str:
+    return f"""(
+        SELECT json_extract_string(kq.value, '$.rating')
+        FROM json_each({json_expr}, '{json_path}') AS kq
+        WHERE lower(json_extract_string(kq.value, '$.name')) = '{rating_name}'
+        ORDER BY TRY_CAST(kq.key AS INTEGER)
+        LIMIT 1
+    )"""
+
+
+def _extract_payload_key_question_rating(
+    current_ratings: object,
+    rating_name: str,
+) -> str | None:
+    ratings = current_ratings if isinstance(current_ratings, dict) else {}
+    overall = ratings.get("overall") if isinstance(ratings, dict) else None
+    if not isinstance(overall, dict):
+        return None
+    key_question_ratings = overall.get("keyQuestionRatings")
+    if not isinstance(key_question_ratings, list):
+        return None
+    for entry in key_question_ratings:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip().lower()
+        if name == rating_name:
+            rating = entry.get("rating")
+            if rating is None:
+                return None
+            return str(rating)
+    return None
 
 PROVIDER_COLUMNS = [
     "provider_id",
@@ -72,6 +116,11 @@ PROVIDER_COLUMNS = [
     "inspection_directorate",
     "current_overall_rating",
     "current_ratings",
+    "rating_safe",
+    "rating_effective",
+    "rating_caring",
+    "rating_responsive",
+    "rating_well_led",
     "regulated_activities",
     "relationships",
     "number_of_locations",
@@ -109,6 +158,11 @@ LOCATION_COLUMNS = [
     "primary_inspection_category",
     "current_overall_rating",
     "current_ratings",
+    "rating_safe",
+    "rating_effective",
+    "rating_caring",
+    "rating_responsive",
+    "rating_well_led",
     "gac_service_types",
     "specialisms",
     "regulated_activities",
@@ -162,6 +216,11 @@ SELECT
     json_extract_string(s.raw_json, '$.inspectionDirectorate') AS inspection_directorate,
     json_extract_string(s.raw_json, '$.currentRatings.overall.rating') AS current_overall_rating,
     json_extract(s.raw_json, '$.currentRatings') AS current_ratings,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "safe")} AS rating_safe,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "effective")} AS rating_effective,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "caring")} AS rating_caring,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "responsive")} AS rating_responsive,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "well-led")} AS rating_well_led,
     COALESCE(json_extract(s.raw_json, '$.regulatedActivities'), CAST('[]' AS JSON)) AS regulated_activities,
     COALESCE(json_extract(s.raw_json, '$.relationships'), CAST('[]' AS JSON)) AS relationships,
     COALESCE(json_array_length(json_extract(s.raw_json, '$.locationIds')), 0) AS number_of_locations,
@@ -299,6 +358,11 @@ SELECT
     ) AS primary_inspection_category,
     json_extract_string(s.raw_json, '$.currentRatings.overall.rating') AS current_overall_rating,
     json_extract(s.raw_json, '$.currentRatings') AS current_ratings,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "safe")} AS rating_safe,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "effective")} AS rating_effective,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "caring")} AS rating_caring,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "responsive")} AS rating_responsive,
+    {_key_question_rating_sql("s.raw_json", "$.currentRatings.overall.keyQuestionRatings", "well-led")} AS rating_well_led,
     COALESCE(json_extract(s.raw_json, '$.gacServiceTypes'), CAST('[]' AS JSON)) AS gac_service_types,
     COALESCE(json_extract(s.raw_json, '$.specialisms'), CAST('[]' AS JSON)) AS specialisms,
     COALESCE(json_extract(s.raw_json, '$.regulatedActivities'), CAST('[]' AS JSON)) AS regulated_activities,
@@ -474,6 +538,26 @@ def parse_provider_payload(
             .get("rating")
         ),
         "current_ratings": _json_text(payload.get("currentRatings")),
+        "rating_safe": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "safe",
+        ),
+        "rating_effective": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "effective",
+        ),
+        "rating_caring": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "caring",
+        ),
+        "rating_responsive": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "responsive",
+        ),
+        "rating_well_led": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "well-led",
+        ),
         "regulated_activities": _json_text(payload.get("regulatedActivities", [])),
         "relationships": _json_text(payload.get("relationships", [])),
         "number_of_locations": len(payload.get("locationIds", [])),
@@ -527,6 +611,26 @@ def parse_location_payload(
             .get("rating")
         ),
         "current_ratings": _json_text(payload.get("currentRatings")),
+        "rating_safe": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "safe",
+        ),
+        "rating_effective": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "effective",
+        ),
+        "rating_caring": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "caring",
+        ),
+        "rating_responsive": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "responsive",
+        ),
+        "rating_well_led": _extract_payload_key_question_rating(
+            payload.get("currentRatings"),
+            "well-led",
+        ),
         "gac_service_types": _json_text(payload.get("gacServiceTypes", [])),
         "specialisms": _json_text(payload.get("specialisms", [])),
         "regulated_activities": _json_text(payload.get("regulatedActivities", [])),
@@ -733,6 +837,48 @@ def load_cqc_staging(
         sync_type,
         loaded,
     )
+
+
+def _backfill_cqc_ratings_table(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    table_name: str,
+) -> int:
+    row = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+    row_count = int(row[0]) if row else 0
+    if row_count <= 0:
+        return 0
+    assignments = ",\n                ".join(
+        f"{column_name} = {_key_question_rating_sql('current_ratings', '$.overall.keyQuestionRatings', rating_name)}"
+        for column_name, rating_name in KEY_QUESTION_RATING_FIELDS
+    )
+    con.execute(
+        f"""
+        UPDATE {table_name}
+        SET {assignments}
+        """
+    )
+    return row_count
+
+
+def backfill_cqc_ratings(db_path: str | Path) -> dict[str, int]:
+    def run_backfill(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+        ensure_pipeline_schema(con)
+        providers_updated = _backfill_cqc_ratings_table(
+            con,
+            table_name="cqc_providers_enriched",
+        )
+        locations_updated = _backfill_cqc_ratings_table(
+            con,
+            table_name="cqc_locations_enriched",
+        )
+        return {
+            "records_updated": providers_updated + locations_updated,
+            "providers_updated": providers_updated,
+            "locations_updated": locations_updated,
+        }
+
+    return with_duckdb_connection(db_path, run_backfill)
 
 
 def _validated_mode(mode: str) -> Mode:

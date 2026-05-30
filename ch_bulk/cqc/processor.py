@@ -97,6 +97,38 @@ HSCA_SERVICE_TYPE_TO_FIELD = {
     "Service type - Extra Care housing services": "st_extra_care_housing_services",
     "Service type - Hospice services at home": "st_hospice_services_at_home",
 }
+HSCA_SERVICE_USER_BAND_PREFIX = "Service user band - "
+HSCA_SERVICE_USER_BAND_SUFFIXES = [
+    "Children 0-18 years",
+    "Dementia",
+    "Learning disabilities or autistic spectrum disorder",
+    "Mental Health",
+    "Older People",
+    "People detained under the Mental Health Act",
+    "People who misuse drugs and alcohol",
+    "People with an eating disorder",
+    "Physical Disability",
+    "Sensory Impairment",
+    "Whole Population",
+    "Younger Adults",
+]
+HSCA_REGULATED_ACTIVITY_PREFIX = "Regulated activity - "
+HSCA_REGULATED_ACTIVITY_SUFFIXES = [
+    "Accommodation for persons who require nursing or personal care",
+    "Accommodation for persons who require treatment for substance misuse",
+    "Assessment or medical treatment for persons detained under the Mental Health Act 1983",
+    "Diagnostic and screening procedures",
+    "Family planning",
+    "Management of supply of blood and blood derived products",
+    "Maternity and midwifery services",
+    "Nursing care",
+    "Personal care",
+    "Services in slimming clinics",
+    "Surgical procedures",
+    "Termination of pregnancies",
+    "Transport services, triage and medical advice provided remotely",
+    "Treatment of disease, disorder or injury",
+]
 HSCA_LOCATION_STAGE_COLUMNS = [
     "location_id",
     "provider_id",
@@ -117,6 +149,8 @@ HSCA_LOCATION_STAGE_COLUMNS = [
     "st_care_home_without_nursing",
     "st_extra_care_housing_services",
     "st_hospice_services_at_home",
+    "service_user_bands",
+    "regulated_activities",
     "bulk_imported_at",
     "bulk_file_date",
     "raw_row",
@@ -287,6 +321,23 @@ def _parse_uk_date(value: object) -> date | None:
         return None
 
 
+def extract_hsca_flags(raw_row_dict: dict[str, object]) -> dict[str, list[str]]:
+    service_user_bands = [
+        suffix
+        for suffix in HSCA_SERVICE_USER_BAND_SUFFIXES
+        if _parse_flag(raw_row_dict.get(f"{HSCA_SERVICE_USER_BAND_PREFIX}{suffix}"))
+    ]
+    regulated_activities = [
+        suffix
+        for suffix in HSCA_REGULATED_ACTIVITY_SUFFIXES
+        if _parse_flag(raw_row_dict.get(f"{HSCA_REGULATED_ACTIVITY_PREFIX}{suffix}"))
+    ]
+    return {
+        "service_user_bands": service_user_bands,
+        "regulated_activities": regulated_activities,
+    }
+
+
 def _build_hsca_location_rows(
     df: pd.DataFrame,
     scrape_date: date,
@@ -302,6 +353,7 @@ def _build_hsca_location_rows(
         if location_id is None or provider_id is None:
             continue
 
+        flags = extract_hsca_flags(record)
         row: dict[str, object] = {
             "location_id": location_id,
             "provider_id": provider_id,
@@ -327,6 +379,16 @@ def _build_hsca_location_rows(
             "dormant": _parse_flag(record.get("Dormant (Y/N)")),
             "registered_manager_name": _clean_text(
                 record.get("Registered manager")
+            ),
+            "service_user_bands": json.dumps(
+                flags["service_user_bands"],
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            "regulated_activities": json.dumps(
+                flags["regulated_activities"],
+                ensure_ascii=True,
+                sort_keys=True,
             ),
             "bulk_imported_at": imported_at,
             "bulk_file_date": scrape_date,
@@ -415,6 +477,8 @@ def _ingest_hsca_to_staging(
                 CAST(st_care_home_without_nursing AS BOOLEAN) AS st_care_home_without_nursing,
                 CAST(st_extra_care_housing_services AS BOOLEAN) AS st_extra_care_housing_services,
                 CAST(st_hospice_services_at_home AS BOOLEAN) AS st_hospice_services_at_home,
+                CAST(service_user_bands AS JSON) AS service_user_bands,
+                CAST(regulated_activities AS JSON) AS regulated_activities,
                 CAST(bulk_imported_at AS TIMESTAMP) AS bulk_imported_at,
                 CAST(bulk_file_date AS DATE) AS bulk_file_date,
                 CAST(raw_row AS JSON) AS raw_row
@@ -653,6 +717,59 @@ def _enforce_cqc_sanity(result: SanityCheckResult, force: bool) -> None:
             "CQC sanity check FAILED:\n  - " + "\n  - ".join(failures)
             + "\n\nRe-run with force=True to override.",
         )
+
+
+def backfill_hsca_flags(db_path: str | Path) -> dict[str, int]:
+    db_path = Path(db_path)
+    con = duckdb.connect(str(db_path))
+    try:
+        ensure_pipeline_schema(con)
+        rows = con.execute(
+            """
+            SELECT location_id, raw_row
+            FROM cqc_hsca_locations
+            ORDER BY location_id
+            """
+        ).fetchall()
+        if not rows:
+            return {"records_updated": 0}
+
+        updates: list[tuple[str, str, str]] = []
+        for location_id, raw_row in rows:
+            payload = json.loads(str(raw_row))
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"Expected HSCA raw_row object payload for location {location_id}"
+                )
+            flags = extract_hsca_flags(payload)
+            updates.append(
+                (
+                    json.dumps(
+                        flags["service_user_bands"],
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                    json.dumps(
+                        flags["regulated_activities"],
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                    str(location_id),
+                )
+            )
+        con.executemany(
+            """
+            UPDATE cqc_hsca_locations
+            SET
+                service_user_bands = CAST(? AS JSON),
+                regulated_activities = CAST(? AS JSON)
+            WHERE location_id = ?
+            """,
+            updates,
+        )
+        return {"records_updated": len(updates)}
+    finally:
+        con.close()
 
 
 def process_cqc_csv(
