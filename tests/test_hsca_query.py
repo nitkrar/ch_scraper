@@ -71,7 +71,9 @@ class _HscaQueryFixture(unittest.TestCase):
                     st_hospice_services_at_home BOOLEAN,
                     bulk_imported_at TIMESTAMP,
                     bulk_file_date DATE,
-                    raw_row JSON
+                    raw_row JSON,
+                    service_user_bands JSON,
+                    regulated_activities JSON
                 )
                 """
             )
@@ -93,7 +95,15 @@ class _HscaQueryFixture(unittest.TestCase):
             )
             con.execute(
                 """
-                INSERT INTO cqc_hsca_locations VALUES
+                INSERT INTO cqc_hsca_locations (
+                    location_id, provider_id, provider_companies_house_number,
+                    provider_ownership_type, provider_brand_name, care_home,
+                    number_of_beds, dormant, st_domiciliary_care_service,
+                    st_supported_living_service, st_care_home_with_nursing,
+                    st_care_home_without_nursing, st_extra_care_housing_services,
+                    st_hospice_services_at_home, bulk_imported_at, bulk_file_date,
+                    raw_row
+                ) VALUES
                     ('L1', 'P1', 'C1', 'Private', 'Brand 1', FALSE, 10, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, NOW(), DATE '2026-05-29', '{"location_id":"L1"}'),
                     ('L2', 'P2', NULL, 'Charity', 'Brand 2', TRUE, 20, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, NOW(), DATE '2026-05-29', '{"location_id":"L2"}'),
                     ('L3', 'P3', 'C3', 'Private', 'Brand 3', FALSE, 30, TRUE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, NOW(), DATE '2026-05-29', '{"location_id":"L3"}')

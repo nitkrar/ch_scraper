@@ -70,6 +70,10 @@ from ch_bulk.companies_house.query import get_filter_options as _get_filter_opti
 from ch_bulk.companies_house.query import query_directors_age
 from ch_bulk.companies_house.query import query_financials
 from ch_bulk.companies_house.query import query_companies
+from ch_bulk.matching.query import (
+    export_tiered_targets_csv as _export_tiered_targets_csv,
+    query_tiered_targets,
+)
 from ch_bulk.web.website_finder import (
     WebsiteFinder,
     load_website_finder_staging as _load_website_finder_staging,
@@ -785,6 +789,10 @@ class ChBulk:
         """Multi-filter paginated query against CH financial enrichment rows."""
         return query_financials(self.db_path, **filters)
 
+    def query_tiered_targets_advanced(self, **filters) -> tuple[list[dict], int]:
+        """Multi-filter paginated query against the tiered_targets screening view."""
+        return query_tiered_targets(self.db_path, **filters)
+
     def get_cqc_filter_options(self) -> dict:
         """Distinct values for CQC filter dropdowns."""
         return _get_cqc_filter_options(self.db_path)
@@ -808,6 +816,10 @@ class ChBulk:
     def export_financials_csv(self, output_path, **filters) -> int:
         """Export filtered CH financial enrichment rows to CSV."""
         return _export_financials_csv(self.db_path, output_path, **filters)
+
+    def export_tiered_targets_csv(self, output_path, **filters) -> int:
+        """Export filtered tiered_targets screening rows to CSV. Returns row count."""
+        return _export_tiered_targets_csv(self.db_path, output_path, **filters)
 
     def export_filtered_csv(self, output_path, **filters) -> int:
         """Export filtered results to CSV via DuckDB COPY. Returns row count."""

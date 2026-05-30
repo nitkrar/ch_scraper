@@ -66,7 +66,9 @@ HSCA_LOCATION_SELECT_SQL = (
     "l.region AS region, "
     "l.local_authority AS local_authority, "
     "l.service_types AS service_types, "
-    "l.is_active AS is_active"
+    "l.is_active AS is_active, "
+    "h.service_user_bands AS service_user_bands, "
+    "h.regulated_activities AS regulated_activities"
 )
 
 

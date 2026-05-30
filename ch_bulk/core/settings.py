@@ -42,6 +42,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "companies_house": "",
         "cqc": "",
     },
+    # ttk theme for the GUI. 'clam'/'alt'/'default' are pure-Tk and scroll
+    # smoothly; 'aqua' is native macOS but sluggish on wide tables.
+    "theme": "clam",
     "llm": {
         "provider": "llamacpp",
         "endpoint": "http://localhost:9741/v1",

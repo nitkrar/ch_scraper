@@ -283,6 +283,7 @@ DIRECTORS_SELECT_SQL = (
     "e.avg_director_age AS avg_director_age, "
     "e.min_director_age AS min_director_age, "
     "e.max_director_age AS max_director_age, "
+    "e.total_active_directors AS total_active_directors, "
     "e.directors_over_60 AS directors_over_60, "
     "e.all_directors_60_plus AS all_directors_60_plus"
 )

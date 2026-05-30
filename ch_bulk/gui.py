@@ -74,6 +74,7 @@ DIRECTORS_COLUMNS = [
     ("avg_director_age", "Avg Age", 70),
     ("min_director_age", "Min Age", 70),
     ("max_director_age", "Max Age", 70),
+    ("total_active_directors", "Total", 60),
     ("directors_over_60", "Over 60", 70),
     ("all_directors_60_plus", "All 60+", 70),
     ("sic_code_1", "SIC 1", 60),
@@ -147,7 +148,32 @@ HSCA_LOCATION_COLUMNS = [
     ("region", "Region", 110),
     ("local_authority", "Local Authority", 150),
     ("service_types", "Service Types", 180),
+    ("service_user_bands", "Service User Bands", 220),
+    ("regulated_activities", "Regulated Activities", 240),
     ("is_active", "In Scrape", 70),
+]
+
+TARGETS_COLUMNS = [
+    ("tier", "Tier", 70),
+    ("total_score", "Score", 55),
+    ("company_name", "Company Name", 220),
+    ("company_number", "Company No", 90),
+    ("provider_name", "Provider", 180),
+    ("address_post_town", "Town", 110),
+    ("postcode", "Postcode", 80),
+    ("revenue", "Revenue", 100),
+    ("employee_count", "Employees", 80),
+    ("total_active_directors", "Total Dir", 70),
+    ("directors_over_60", "Over 60", 70),
+    ("all_directors_60_plus", "All 60+", 65),
+    ("verdict", "Verdict", 160),
+    ("sources_agreement", "Sources", 90),
+    ("match_status", "Match", 110),
+    ("class_pts", "Cls", 45),
+    ("age_pts", "Age", 45),
+    ("size_pts", "Size", 45),
+    ("evidence_quote", "Evidence", 280),
+    ("source_url", "Source URL", 200),
 ]
 
 
@@ -1270,6 +1296,237 @@ class CQCPane(_PaneBase):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Targets pane (tiered_targets screening output)
+# ─────────────────────────────────────────────────────────────────────
+
+class TargetsPane(_PaneBase):
+    title = "Targets"
+
+    _TIER_CHOICES = {
+        "Tier 1-3": ["Tier 1", "Tier 2", "Tier 3"],
+        "Tier 1": ["Tier 1"],
+        "Tier 2": ["Tier 2"],
+        "Tier 3": ["Tier 3"],
+        "All (incl Excluded)": None,
+    }
+
+    def __init__(self, parent: ttk.Frame, app: "ChBulkApp"):
+        super().__init__(parent, app)
+        self.page = 1
+        self.total_pages = 1
+        self.sort_by = "total_score"
+        self.sort_order = "DESC"
+        self._build()
+
+    def _build(self) -> None:
+        ttk.Label(
+            self.frame, text="Tiered Targets",
+            font=("TkDefaultFont", 14, "bold"),
+        ).pack(pady=(8, 4), anchor="w", padx=10)
+
+        f = ttk.LabelFrame(self.frame, text="Filters")
+        f.pack(fill="x", padx=10, pady=4)
+
+        ttk.Label(f, text="Tier:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+        self.tier_var = tk.StringVar(value="Tier 1-3")
+        self.tier_combo = ttk.Combobox(
+            f, textvariable=self.tier_var, state="readonly", width=20,
+            values=list(self._TIER_CHOICES.keys()),
+        )
+        self.tier_combo.grid(row=0, column=1, sticky="w", padx=4)
+        self.tier_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_search())
+
+        ttk.Label(f, text="Search:").grid(row=0, column=2, sticky="e", padx=4)
+        self.search_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.search_var, width=24).grid(row=0, column=3, sticky="w", padx=4)
+
+        self.any60_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f, text="Any director 60+", variable=self.any60_var,
+            command=self._on_search,
+        ).grid(row=0, column=4, sticky="w", padx=8)
+
+        ttk.Label(f, text="Min revenue:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+        self.min_revenue_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.min_revenue_var, width=12).grid(row=1, column=1, sticky="w", padx=4)
+
+        ttk.Label(f, text="Min employees:").grid(row=1, column=2, sticky="e", padx=4)
+        self.min_employees_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.min_employees_var, width=8).grid(row=1, column=3, sticky="w", padx=4)
+
+        action_row = ttk.Frame(f)
+        action_row.grid(row=2, column=0, columnspan=6, sticky="e", padx=4, pady=(6, 4))
+        self.btn_search = ttk.Button(action_row, text="Search", command=self._on_search)
+        self.btn_search.pack(side="left", padx=2)
+        ttk.Button(action_row, text="Clear", command=self._on_clear).pack(side="left", padx=2)
+        self.btn_export = ttk.Button(action_row, text="Export CSV", command=self._on_export)
+        self.btn_export.pack(side="left", padx=2)
+
+        _make_filter_grid_responsive(f)
+
+        rf = ttk.Frame(self.frame)
+        rf.pack(fill="both", expand=True, padx=10, pady=4)
+        self.count_label = ttk.Label(rf, text="")
+        self.count_label.pack(anchor="w")
+        tree_frame = ttk.Frame(rf)
+        tree_frame.pack(fill="both", expand=True)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        cols = [c[0] for c in TARGETS_COLUMNS]
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
+        for key, heading, width in TARGETS_COLUMNS:
+            self.tree.heading(key, text=heading, command=lambda k=key: self._on_sort(k))
+            self.tree.column(key, width=width, minwidth=width, stretch=False)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        pag = ttk.Frame(rf)
+        pag.pack(fill="x", pady=4)
+        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
+        self.btn_prev.pack(side="left")
+        self.page_label = ttk.Label(pag, text="Page 1 of 1")
+        self.page_label.pack(side="left", padx=10)
+        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
+        self.btn_next.pack(side="left")
+
+    def action_buttons(self) -> list[ttk.Widget]:
+        return [self.btn_search, self.btn_export]
+
+    def refresh(self) -> None:
+        # Auto-load on first show / pane switch (16K-row view, cheap + paginated).
+        self._run_query()
+
+    def _get_filters(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"tiers": self._TIER_CHOICES.get(self.tier_var.get(), None)}
+        search = self.search_var.get().strip()
+        if search:
+            out["search"] = search
+        if self.any60_var.get():
+            out["any_director_over_60"] = True
+        raw_revenue = self.min_revenue_var.get().replace(",", "").strip()
+        if raw_revenue:
+            try:
+                out["min_revenue"] = float(raw_revenue)
+            except ValueError:
+                pass
+        try:
+            out["min_employees"] = int(self.min_employees_var.get())
+        except (TypeError, ValueError):
+            pass
+        out["sort_by"] = self.sort_by
+        out["sort_order"] = self.sort_order
+        out["page"] = self.page
+        out["page_size"] = PAGE_SIZE
+        return out
+
+    def _on_clear(self) -> None:
+        self.tier_var.set("Tier 1-3")
+        self.search_var.set("")
+        self.any60_var.set(False)
+        self.min_revenue_var.set("")
+        self.min_employees_var.set("")
+        self.sort_by = "total_score"
+        self.sort_order = "DESC"
+        self.page = 1
+        self._run_query()
+
+    def _on_search(self) -> None:
+        self.page = 1
+        self._run_query()
+
+    def _on_sort(self, col: str) -> None:
+        if self.sort_by == col and self.sort_order == "ASC":
+            self.sort_order = "DESC"
+        elif self.sort_by == col:
+            self.sort_order = "ASC"
+        else:
+            self.sort_by = col
+            self.sort_order = "ASC"
+        self.page = 1
+        self._run_query()
+
+    def _on_prev(self) -> None:
+        if self.page > 1:
+            self.page -= 1
+            self._run_query()
+
+    def _on_next(self) -> None:
+        if self.page < self.total_pages:
+            self.page += 1
+            self._run_query()
+
+    def _run_query(self) -> None:
+        if self.app._task_running:
+            self.app._set_status("A task is already running.", error=True)
+            return
+        self.app._set_status("Searching targets...")
+        self.btn_search.configure(state="disabled")
+        self.btn_export.configure(state="disabled")
+
+        def worker(cancel_event: threading.Event | None = None) -> None:
+            try:
+                rows, total = self.ch.query_tiered_targets_advanced(**self._get_filters())
+                self.app.root.after(0, lambda: self._display(rows, total))
+            except FileNotFoundError:
+                self.app.root.after(0, lambda: self.app._set_status("No DB. Click Sync first."))
+            except Exception as exc:
+                logger.exception("Targets query error")
+                err = f"Query error: {exc}"
+                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
+            finally:
+                self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
+                self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
+
+        self.app._register_task(worker, label="Targets search", can_cancel=False)
+
+    def _display(self, rows, total) -> None:
+        self.total_pages = max(1, -(-total // PAGE_SIZE))
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            self.tree.insert(
+                "", "end",
+                values=[_format_cell(row.get(c[0])) for c in TARGETS_COLUMNS],
+            )
+        if total == 0:
+            self.count_label.configure(
+                text="No targets — run matching + enrichment first."
+            )
+        else:
+            self.count_label.configure(text=f"{total:,} targets")
+        self.page_label.configure(text=f"Page {self.page} of {self.total_pages}")
+        self.btn_prev.configure(state="normal" if self.page > 1 else "disabled")
+        self.btn_next.configure(state="normal" if self.page < self.total_pages else "disabled")
+
+    def _on_export(self) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="tiered_targets_export.csv",
+        )
+        if not path:
+            return
+        filters = self._get_filters()
+        for k in ("page", "page_size", "sort_by", "sort_order"):
+            filters.pop(k, None)
+        self.app._set_status("Exporting targets...")
+
+        def worker(cancel_event: threading.Event | None = None) -> None:
+            try:
+                n = self.ch.export_tiered_targets_csv(path, **filters)
+                self.app.root.after(0, lambda: self.app._set_status(f"Exported {n:,} targets to {path}"))
+            except Exception as exc:
+                logger.exception("Targets export error")
+                err = f"Export error: {exc}"
+                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
+
+        self.app._register_task(worker, label="Targets export", can_cancel=False)
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Settings pane
 # ─────────────────────────────────────────────────────────────────────
 
@@ -1320,6 +1577,30 @@ class SettingsPane(_PaneBase):
 
         keys_frame.grid_columnconfigure(1, weight=1)
 
+        # ── Appearance section ───────────────────────────────────────
+        appearance_frame = ttk.LabelFrame(self.frame, text="Appearance")
+        appearance_frame.pack(fill="x", padx=10, pady=4)
+        ttk.Label(appearance_frame, text="Theme:").grid(
+            row=0, column=0, sticky="e", padx=4, pady=4,
+        )
+        self.theme_var = tk.StringVar()
+        self.theme_combo = ttk.Combobox(
+            appearance_frame, textvariable=self.theme_var, state="readonly",
+            width=20, values=sorted(self.app._style.theme_names()),
+        )
+        self.theme_combo.grid(row=0, column=1, sticky="w", padx=4, pady=4)
+        # Apply live on selection so you can preview before saving.
+        self.theme_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self.app.apply_theme(self.theme_var.get()),
+        )
+        ttk.Label(
+            appearance_frame,
+            text="'clam' / 'alt' / 'default' scroll smoothly; 'aqua' is native "
+                 "macOS but sluggish on wide tables. Click Save to persist.",
+            foreground="gray", wraplength=640, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 4))
+
         # ── Buttons + status ────────────────────────────────────────
         action_row = ttk.Frame(self.frame)
         action_row.pack(fill="x", padx=10, pady=8)
@@ -1344,6 +1625,7 @@ class SettingsPane(_PaneBase):
         self._settings = load_settings(self.ch.data_dir)
         self.ch_key_var.set(self._settings.get("api_keys", {}).get("companies_house", ""))
         self.cqc_key_var.set(self._settings.get("api_keys", {}).get("cqc", ""))
+        self.theme_var.set(self._settings.get("theme", "clam"))
         self.save_status.configure(text="Loaded from disk", foreground="gray")
 
     def _on_save(self) -> None:
@@ -1354,8 +1636,10 @@ class SettingsPane(_PaneBase):
         self._settings.setdefault("api_keys", {})
         self._settings["api_keys"]["companies_house"] = self.ch_key_var.get().strip()
         self._settings["api_keys"]["cqc"] = self.cqc_key_var.get().strip()
+        self._settings["theme"] = self.theme_var.get() or "clam"
         try:
             save_settings(self.ch.data_dir, self._settings)
+            self.app.apply_theme(self._settings["theme"])
             self.save_status.configure(
                 text=f"Saved at {datetime.now().strftime('%H:%M:%S')}",
                 foreground="green",
@@ -1393,6 +1677,15 @@ class ChBulkApp:
         self.root.geometry("1200x800")
         self.root.minsize(950, 600)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Apply the saved ttk theme (default 'clam'). Pure-Tk themes
+        # ('clam'/'alt'/'default') scroll the wide tables far more smoothly
+        # than the native macOS 'aqua' theme, which repaints the whole visible
+        # grid on every scroll tick. Editable live from the Settings pane.
+        from ch_bulk.core.settings import load_settings
+        self._style = ttk.Style()
+        saved_theme = load_settings(self.ch.data_dir).get("theme", "clam")
+        self.apply_theme(saved_theme)
 
         # Route Cmd-Q (macOS) and Ctrl-Q / Ctrl-W (Linux/Windows) through
         # _on_close. On macOS we MUST use ::tk::mac::Quit instead of
@@ -1435,12 +1728,14 @@ class ChBulkApp:
         self.panes: dict[str, _PaneBase] = {
             "CH Companies": CHPane(self.content, self),
             "CQC": CQCPane(self.content, self),
+            "Targets": TargetsPane(self.content, self),
             "Settings": SettingsPane(self.content, self),
         }
         # Abbreviations used when the rail is collapsed
         self._nav_abbrev = {
             "CH Companies": "CH",
             "CQC": "CQ",
+            "Targets": "🎯",
             "Settings": "⚙",
         }
         self.current_pane_name: str | None = None
@@ -1462,6 +1757,15 @@ class ChBulkApp:
 
         # Start with the nav collapsed; user can expand via the ◀ button
         self._toggle_nav()
+
+    def apply_theme(self, theme: str) -> None:
+        """Apply a ttk theme by name, falling back to 'clam' if unavailable."""
+        for candidate in (theme, "clam"):
+            try:
+                self._style.theme_use(candidate)
+                return
+            except tk.TclError:
+                continue
 
     def _toggle_nav(self) -> None:
         self._nav_collapsed = not self._nav_collapsed
@@ -1767,7 +2071,33 @@ class ChBulkApp:
         _tick()
 
     def run(self) -> None:
-        self.root.mainloop()
+        # macOS/Tk: Tk's C mainloop never yields to Python's signal machinery,
+        # so a terminal Ctrl-C (SIGINT) aborts the process with a fatal
+        # "PyEval_SaveThread ... GIL is released" error instead of a clean exit.
+        # A periodic no-op keeps the interpreter ticking so the SIGINT handler
+        # can run, and we route Ctrl-C through the normal cooperative-close path
+        # (same as clicking the window's close button).
+        import signal
+
+        def _signal_keepalive() -> None:
+            self.root.after(200, _signal_keepalive)
+
+        def _on_sigint(_signum, _frame) -> None:
+            # Schedule on the Tk loop; never touch Tk from the signal context.
+            self.root.after(0, self._on_close)
+
+        self.root.after(200, _signal_keepalive)
+        try:
+            signal.signal(signal.SIGINT, _on_sigint)
+        except ValueError:
+            # Not on the main thread — can't install a handler; the
+            # KeyboardInterrupt backstop below still applies.
+            pass
+
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            self._on_close()
 
 
 def main(

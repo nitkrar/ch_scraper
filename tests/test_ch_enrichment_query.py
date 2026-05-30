@@ -81,7 +81,9 @@ class _ChEnrichmentQueryFixture(unittest.TestCase):
                     net_current_assets DOUBLE,
                     filing_id TEXT,
                     filing_format TEXT,
-                    filing_age_months INTEGER
+                    filing_age_months INTEGER,
+                    total_active_directors INTEGER,
+                    directors JSON
                 )
                 """
             )
@@ -132,7 +134,15 @@ class _ChEnrichmentQueryFixture(unittest.TestCase):
             )
             con.execute(
                 """
-                INSERT INTO company_enrichment VALUES
+                INSERT INTO company_enrichment (
+                    company_number, avg_director_age, min_director_age,
+                    max_director_age, directors_over_60, all_directors_60_plus,
+                    directors_dob_years, revenue, revenue_source, employee_count,
+                    filing_period_start, filing_period_end, gross_profit,
+                    profit_before_tax, profit_after_tax, fixed_assets,
+                    current_assets, total_assets, net_assets, net_current_assets,
+                    filing_id, filing_format, filing_age_months
+                ) VALUES
                     (
                         'A1', 65, 60, 70, 2, TRUE, '[1960,1956]',
                         1500000.0, 'filed_accounts_ixbrl', 30,
