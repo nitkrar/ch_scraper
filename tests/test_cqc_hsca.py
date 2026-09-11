@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk.cqc.downloader import download_hsca_filters
+from ch_bulk.cqc.downloader import download_hsca_filters, find_latest_csv_url
 from ch_bulk.cqc.processor import process_hsca_filters
 from ch_bulk.companies_house.processor import SanityCheckError
 
@@ -105,6 +105,51 @@ class HSCADownloaderTests(unittest.TestCase):
 
             self.assertEqual(path.name, "hsca_active_locations_2026-05-05.ods")
             self.assertEqual(path.read_bytes(), b"chunk-achunk-b")
+
+    def test_download_hsca_filters_handles_system_files_path(self):
+        """CQC moved published assets from /sites/default/files/ to /system/files/.
+
+        The links are also emitted as absolute URLs now rather than
+        site-relative paths. Both shapes must resolve.
+        """
+        listing_html = """
+        <a href="https://www.cqc.org.uk/system/files/2026-07/03_July_2026_HSCA_Active_Locations.ods">old</a>
+        <a href="https://www.cqc.org.uk/system/files/2026-08/04_August_2026_HSCA_Active_Locations.ods">new</a>
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch(
+                    "ch_bulk.cqc.downloader.httpx.get",
+                    return_value=_MockResponse(listing_html),
+                ),
+                patch(
+                    "ch_bulk.cqc.downloader.httpx.stream",
+                    return_value=_MockStreamResponse([b"ods-bytes"]),
+                ),
+            ):
+                path = download_hsca_filters(Path(tmpdir))
+
+            self.assertEqual(path.name, "hsca_active_locations_2026-08-04.ods")
+            self.assertEqual(path.read_bytes(), b"ods-bytes")
+
+    def test_find_latest_csv_url_handles_system_files_path(self):
+        """The CQC directory CSV lives under the same relocated path."""
+        listing_html = (
+            '<a href="https://www.cqc.org.uk/system/files/2026-08/'
+            '12_August_2026_CQC_directory.csv">directory</a>'
+        )
+        with patch(
+            "ch_bulk.cqc.downloader.httpx.get",
+            return_value=_MockResponse(listing_html),
+        ):
+            url, published = find_latest_csv_url()
+
+        self.assertEqual(published, date(2026, 8, 12))
+        self.assertEqual(
+            url,
+            "https://www.cqc.org.uk/system/files/2026-08/12_August_2026_CQC_directory.csv",
+        )
 
 
 class HSCAProcessorTests(unittest.TestCase):

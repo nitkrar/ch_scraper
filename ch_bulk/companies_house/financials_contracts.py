@@ -19,6 +19,10 @@ TERMINAL_REVENUE_SOURCES = {
     "no_recent_filing",
     "pdf_no_text_layer",
     "partial_no_revenue",
+    # Figures recovered by OCR from a scanned PDF. Terminal for the same
+    # reason as pdf_no_text_layer: the filing has no text layer, so a re-fetch
+    # can only overwrite the recovered values with pdf_no_text_layer again.
+    "filed_accounts_pdf_ocr",
 }
 ERROR_PARSE_STATUSES = {
     "request_error",

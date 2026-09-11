@@ -50,12 +50,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("ocr_staged_pdfs")
 
 PAGE_BREAK = "\n--- PAGE BREAK ---\n"
-OCR_DPI = 200
+# 200 dpi renders tables with the numeric columns dropped by tesseract on
+# real CH filings; 400 recovers them at ~4x the render cost. See --dpi.
+OCR_DPI = 400
 
 
-def ocr_pdf(pdf_path: Path) -> tuple[int, str]:
+def ocr_pdf(pdf_path: Path, dpi: int = OCR_DPI) -> tuple[int, str]:
     """Return (page_count, joined_text)."""
-    images = convert_from_path(str(pdf_path), dpi=OCR_DPI)
+    images = convert_from_path(str(pdf_path), dpi=dpi)
     parts = [pytesseract.image_to_string(img, lang="eng") for img in images]
     return len(images), PAGE_BREAK.join(parts)
 
@@ -73,7 +75,7 @@ def filter_text(full_text: str) -> tuple[str, list[dict]]:
     return PAGE_BREAK.join(kept_pages), labels
 
 
-def process_pdf(pdf_path: Path) -> dict:
+def process_pdf(pdf_path: Path, dpi: int = OCR_DPI) -> dict:
     """Idempotent: produce .ocr.txt and .filtered.txt + .pages.json sidecars next to PDF."""
     cn = pdf_path.parent.name
     stem = pdf_path.stem
@@ -102,7 +104,7 @@ def process_pdf(pdf_path: Path) -> dict:
     else:
         try:
             t0 = time.time()
-            n_pages, full_text = ocr_pdf(pdf_path)
+            n_pages, full_text = ocr_pdf(pdf_path, dpi=dpi)
             elapsed = time.time() - t0
         except Exception as exc:
             logger.exception("OCR failed for %s", pdf_path)
@@ -135,6 +137,12 @@ def process_pdf(pdf_path: Path) -> dict:
     return result
 
 
+def _default_staging_dir() -> Path:
+    from ch_bulk.core.paths import raw_dir
+
+    return raw_dir("data", "companies_house") / "filings"
+
+
 def discover_pdfs(staging_dir: Path) -> list[Path]:
     """Return all .pdf files under staging_dir/<cn>/."""
     pdfs = []
@@ -147,8 +155,12 @@ def discover_pdfs(staging_dir: Path) -> list[Path]:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--staging-dir", type=Path,
-                   default=Path("/Users/nitinkum/Projects/nitkrar/ch_scraper/data/staging/filings"))
+    # Derive from the same helper the enrichment pipeline writes with, rather
+    # than hardcoding: filings land in
+    # data/staging/raw/companies_house/filings/<cn>/<filing_id>.pdf
+    p.add_argument("--staging-dir", type=Path, default=_default_staging_dir())
+    p.add_argument("--dpi", type=int, default=OCR_DPI,
+                   help="Render DPI. 200 loses numeric table columns; 400 recovers them.")
     p.add_argument("--limit", type=int, default=0, help="0 = unlimited; process at most N PDFs")
     p.add_argument("--workers", type=int, default=1,
                    help="Concurrent PDFs. Tesseract is CPU-bound; >1 only if cores available.")
@@ -188,7 +200,7 @@ def main() -> int:
 
     if args.workers == 1:
         for pdf in pending:
-            r = process_pdf(pdf)
+            r = process_pdf(pdf, dpi=args.dpi)
             done += 1
             if "error" in r:
                 errs += 1
@@ -205,7 +217,7 @@ def main() -> int:
                             done, len(pending), ocr_ran, filter_ran, errs)
     else:
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futures = {ex.submit(process_pdf, pdf): pdf for pdf in pending}
+            futures = {ex.submit(process_pdf, pdf, args.dpi): pdf for pdf in pending}
             for fut in as_completed(futures):
                 r = fut.result()
                 done += 1

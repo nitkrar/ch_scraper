@@ -1,5 +1,19 @@
 # Scripts
 
+## Requirements
+
+The Python packages these scripts need (`openpyxl`, `pdf2image`, `pytesseract`)
+are part of the base install, so `./setup.sh` covers them.
+
+`ocr_staged_pdfs.py` additionally needs two **system** binaries that pip cannot
+install. Without them it fails at runtime, not at import:
+
+```bash
+brew install tesseract poppler    # provides `tesseract` and `pdftoppm`
+```
+
+Verify with `which tesseract pdftoppm`.
+
 ## Maintained helpers
 
 - `annotate_pl_exemption.py` — annotate extraction JSONL rows with a `profit_loss_exempt` flag.

@@ -37,16 +37,19 @@ fi
 
 echo "Using $PYTHON ($($PYTHON --version))"
 
+# Major.minor of the interpreter we picked, used for version-specific hints.
+PYVER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+
 # Check for Tkinter (required for the GUI)
 TK_OK=true
 if ! "$PYTHON" -c "import tkinter" 2>/dev/null; then
     TK_OK=false
     echo ""
-    echo "WARNING: Tkinter is not available for this Python."
+    echo "WARNING: Tkinter is not available for this Python ($PYVER)."
     echo "The CLI will work fine, but 'ch-bulk ui' (the GUI) will not."
     echo ""
     echo "To install Tkinter:"
-    echo "  macOS (Homebrew):  brew install python-tk@3.12"
+    echo "  macOS (Homebrew):  brew install python-tk@$PYVER"
     echo "  Ubuntu/Debian:     sudo apt install python3-tk"
     echo "  Fedora/RHEL:       sudo dnf install python3-tkinter"
     echo "  Windows:           Reinstall Python with 'tcl/tk' checked"
@@ -55,27 +58,60 @@ if ! "$PYTHON" -c "import tkinter" 2>/dev/null; then
     echo ""
 fi
 
-# Create virtual environment
+# Create virtual environment.
+#
+# An existing .venv is not enough: a venv is a set of symlinks into a specific
+# interpreter, so upgrading or uninstalling that interpreter (e.g. Homebrew
+# replacing python@3.12 with python@3.14) leaves the directory in place with a
+# dangling .venv/bin/python. Every entrypoint then fails with a confusing
+# "no such file or directory". Probe the interpreter and rebuild if it is
+# broken or no longer matches the Python we selected above.
+RECREATE_REASON=""
 if [ ! -d ".venv" ]; then
-    echo "Creating virtual environment..."
+    RECREATE_REASON="not present"
+elif ! .venv/bin/python -c "pass" 2>/dev/null; then
+    RECREATE_REASON="its interpreter no longer runs (was the system Python upgraded or removed?)"
+else
+    VENV_PYVER=$(.venv/bin/python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    if [ "$VENV_PYVER" != "$PYVER" ]; then
+        RECREATE_REASON="it is on Python $VENV_PYVER but this setup targets $PYVER"
+    fi
+fi
+
+if [ -n "$RECREATE_REASON" ]; then
+    if [ -d ".venv" ]; then
+        echo "Rebuilding virtual environment: $RECREATE_REASON."
+        rm -rf .venv
+    else
+        echo "Creating virtual environment..."
+    fi
     "$PYTHON" -m venv .venv
 else
-    echo "Virtual environment already exists."
+    echo "Virtual environment already exists and is healthy."
 fi
 
 echo "Installing dependencies..."
 .venv/bin/pip install --upgrade pip --quiet
-.venv/bin/pip install -e . --quiet
+# [dev] adds pytest so the test suite runs on a fresh clone.
+.venv/bin/pip install -e '.[dev]' --quiet
 
 # Verify
 echo ""
 echo "Verifying installation..."
 .venv/bin/python -c "from ch_bulk import ChBulk; print('  Python API: OK')"
 .venv/bin/ch-bulk --help > /dev/null 2>&1 && echo "  CLI:        OK" || echo "  CLI:        FAILED"
-if [ "$TK_OK" = true ]; then
-    .venv/bin/python -c "import tkinter" 2>/dev/null && echo "  GUI (Tk):   OK" || echo "  GUI (Tk):   MISSING"
+if .venv/bin/python -c "import tkinter" 2>/dev/null; then
+    # Tkinter importing is necessary but not sufficient — check the GUI module
+    # itself loads, so a broken import surfaces here rather than on first launch.
+    if .venv/bin/python -c "import ch_bulk.gui" 2>/dev/null; then
+        echo "  GUI (Tk):   OK"
+    else
+        echo "  GUI (Tk):   Tk present but 'import ch_bulk.gui' FAILED:"
+        .venv/bin/python -c "import ch_bulk.gui" 2>&1 | tail -3 | sed 's/^/              /'
+    fi
 else
-    echo "  GUI (Tk):   MISSING (see warning above)"
+    TK_OK=false
+    echo "  GUI (Tk):   MISSING — run: brew install python-tk@$PYVER  (macOS/Homebrew)"
 fi
 
 # Create Desktop shortcut (macOS only)

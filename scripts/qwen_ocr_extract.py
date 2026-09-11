@@ -32,6 +32,8 @@ from pathlib import Path
 
 import requests
 
+from ch_bulk.companies_house.financials_parsers import coerce_employee_count
+
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger("qwen_extract")
@@ -190,7 +192,7 @@ def build_jsonl_row(rec: dict, parsed: dict | None, raw: str, source: str, perio
         "filing_period_end": date_field("filing_period_end"),
         "revenue": num("revenue"),
         "turnover": num("revenue"),
-        "employee_count": int_field("employee_count"),
+        "employee_count": coerce_employee_count(int_field("employee_count")),
         "gross_profit": num("gross_profit"),
         "profit_before_tax": num("profit_before_tax"),
         "profit_after_tax": num("profit_after_tax"),
@@ -200,7 +202,7 @@ def build_jsonl_row(rec: dict, parsed: dict | None, raw: str, source: str, perio
         "net_assets": num("net_assets"),
         "net_current_assets": num("net_current_assets"),
         "filing_age_months": None,
-        "parse_status": "ok" if (parsed and num("revenue") is not None and int_field("employee_count") is not None) else (
+        "parse_status": "ok" if (parsed and num("revenue") is not None and coerce_employee_count(int_field("employee_count")) is not None) else (
             "partial" if parsed else "ocr_extract_error"
         ),
         "parse_failure_reason": None if parsed else "ocr_extract_parse_failed",

@@ -350,6 +350,22 @@ def ensure_pipeline_schema(con: duckdb.DuckDBPyConnection) -> None:
         ensure_enrichment_columns(con)
 
         if _table_exists(con, "companies"):
+            if not _table_exists(con, "cqc_locations"):
+                con.execute(
+                    "CREATE TABLE cqc_locations ("
+                    "  location_id TEXT PRIMARY KEY,"
+                    "  name TEXT, also_known_as TEXT, address TEXT,"
+                    "  postcode TEXT, phone_number TEXT, website TEXT,"
+                    "  service_types TEXT, date_of_latest_check_raw TEXT,"
+                    "  specialisms TEXT, provider_name TEXT,"
+                    "  local_authority TEXT, region TEXT,"
+                    "  location_url TEXT, provider_id TEXT,"
+                    "  is_active BOOLEAN,"
+                    "  first_scrape_date DATE, last_scrape_date DATE,"
+                    "  marked_inactive_scrape_date DATE,"
+                    "  last_enriched_at TIMESTAMP"
+                    ")"
+                )
             logger.info("Applying macros/views SQL: %s", VIEWS_FILE.name)
             _run_sql_file(con, VIEWS_FILE)
         else:

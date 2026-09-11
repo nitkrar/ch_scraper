@@ -21,6 +21,14 @@ EMPLOYEE_COUNT_FACTS = (
     "AverageNumberEmployeesDuringPeriod",
     "AverageNumberEmployeesDuringYear",
 )
+# These facts are a headcount, and two things put non-headcount values in them:
+#   - the OCR path reading the staff-costs total out of the "Employees and
+#     directors" note (wages + NI + pension) instead of the headcount below it;
+#   - filings that tag the headcount with sign="-", which the iXBRL spec says
+#     to negate, giving "-9 employees".
+# Neither is recoverable here, so bound the value instead. The PDF regex path
+# already caps its match at six digits; hold every path to the same ceiling.
+MAX_PLAUSIBLE_EMPLOYEE_COUNT = 999_999
 GROSS_PROFIT_FACTS = ("GrossProfitLoss",)
 PROFIT_BEFORE_TAX_FACTS = (
     "ProfitLossOnOrdinaryActivitiesBeforeTax",
@@ -186,6 +194,24 @@ def _parse_date(value: object) -> date | None:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def coerce_employee_count(value: object) -> int | None:
+    """Coerce an extracted employee headcount, dropping implausible values.
+
+    A wrong headcount is worse than a missing one: it silently turns a
+    20-person provider into a 1.7-million-employee one and passes every
+    downstream size filter.
+    """
+    if value is None:
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    if count < 0 or count > MAX_PLAUSIBLE_EMPLOYEE_COUNT:
+        return None
+    return count
 
 
 def _has_ixbrl_profit_loss_exemption_marker(content: bytes) -> bool:
@@ -391,9 +417,7 @@ def _parse_ixbrl_bytes(
         instant=True,
     )
 
-    employee_count = (
-        int(employee_count_value) if employee_count_value is not None else None
-    )
+    employee_count = coerce_employee_count(employee_count_value)
     filing_period_start, filing_period_end = _pick_ixbrl_period_bounds(rows)
     revenue_value = float(revenue) if revenue is not None else None
     gross_profit_value = (
@@ -587,9 +611,7 @@ def _parse_pdf_bytes(
     text = "\n".join(page_texts)
     revenue = _first_regex_value(text, REVENUE_REGEXES)
     employee_count_value = _first_regex_value(text, EMPLOYEE_COUNT_REGEXES)
-    employee_count = (
-        int(employee_count_value) if employee_count_value is not None else None
-    )
+    employee_count = coerce_employee_count(employee_count_value)
     gross_profit = _first_regex_value(text, GROSS_PROFIT_REGEXES)
     profit_before_tax = _first_regex_value(
         text,

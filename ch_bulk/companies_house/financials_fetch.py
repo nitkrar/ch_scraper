@@ -21,6 +21,8 @@ from ch_bulk.companies_house.financials_contracts import (
     IXBRL_RESOURCE,
     PDF_EXTENSION,
     PDF_RESOURCE,
+    FILED_REVENUE_SOURCES,
+    TERMINAL_REVENUE_SOURCES,
 )
 from ch_bulk.core.cancellation import OperationCancelled, cancellable_sleep
 from ch_bulk.companies_house.financials_parsers import _parse_date
@@ -331,11 +333,11 @@ def _select_targets(
             NULLIF(CAST(ce.filing_id AS VARCHAR), '') AS filing_id,
             NULLIF(CAST(ce.filing_format AS VARCHAR), '') AS filing_format
         """
-        filters = """
-          AND COALESCE(ce.revenue_source, '') NOT IN ('no_recent_filing', 'pdf_no_text_layer', 'partial_no_revenue')
+        filters = f"""
+          AND COALESCE(ce.revenue_source, '') NOT IN ({_terminal_sources_sql()})
           AND NOT (
                 ce.revenue IS NOT NULL
-            AND ce.revenue_source IN ('filed_accounts_ixbrl', 'filed_accounts_pdf')
+            AND ce.revenue_source IN ({_filed_sources_sql()})
           )
         """
 
@@ -414,6 +416,72 @@ def _save_raw_filing(
     return target_path
 
 
+def _terminal_sources_sql() -> str:
+    """Render TERMINAL_REVENUE_SOURCES as a SQL IN-list.
+
+    Derived from the constant rather than restated inline so the set cannot
+    drift from the one the enricher applies.
+    """
+    return ", ".join(f"'{source}'" for source in sorted(TERMINAL_REVENUE_SOURCES))
+
+
+def _filed_sources_sql() -> str:
+    """Render FILED_REVENUE_SOURCES as a SQL IN-list."""
+    return ", ".join(f"'{source}'" for source in sorted(FILED_REVENUE_SOURCES))
+
+
+def _document_bytes(
+    *,
+    client: Any,
+    data_dir: str | Path,
+    company_number: str,
+    filing_id: str,
+    document_metadata_url: str,
+    accept: str,
+    filing_format: str,
+    cancel_event: threading.Event | None,
+) -> tuple[bytes, Path]:
+    """Return the filing's bytes, reusing a previously saved copy if present.
+
+    A Companies House document is immutable for a given filing_id, so a file
+    already on disk is always safe to serve. Only _select_targets consulted the
+    saved copies before, and only in incremental mode, which meant mode=list
+    and mode=all re-downloaded documents we already had -- the expensive case
+    being multi-megabyte scanned PDFs.
+
+    Raises whatever the client raises on a failed download, so callers keep
+    their existing HTTPError handling.
+    """
+    cached = _raw_filing_path(
+        data_dir=data_dir,
+        company_number=company_number,
+        filing_id=filing_id,
+        filing_format=filing_format,
+    )
+    if cached is not None:
+        logger.debug("Reusing saved filing %s", cached)
+        return cached.read_bytes(), cached
+
+    request_kwargs: dict[str, object] = {
+        "document_metadata_url": document_metadata_url,
+        "accept": accept,
+    }
+    if cancel_event is not None:
+        request_kwargs["cancel_event"] = cancel_event
+    content = client.download_document_content(**request_kwargs)
+
+    extension = _filing_extension_for_format(filing_format)
+    assert extension is not None, f"unknown filing_format: {filing_format}"
+    saved = _save_raw_filing(
+        data_dir=data_dir,
+        company_number=company_number,
+        filing_id=filing_id,
+        extension=extension,
+        content=content,
+    )
+    return content, saved
+
+
 def _build_fetched_row(
     *,
     target: FinancialTarget,
@@ -487,13 +555,16 @@ def _fetch_company_work_item(
 
         if filing.paper_filed:
             try:
-                request_kwargs: dict[str, object] = {
-                    "document_metadata_url": filing.document_metadata_url,
-                    "accept": PDF_RESOURCE,
-                }
-                if cancel_event is not None:
-                    request_kwargs["cancel_event"] = cancel_event
-                content = client.download_document_content(**request_kwargs)
+                content, raw_path = _document_bytes(
+                    client=client,
+                    data_dir=data_dir,
+                    company_number=target.company_number,
+                    filing_id=filing.filing_id,
+                    document_metadata_url=filing.document_metadata_url,
+                    accept=PDF_RESOURCE,
+                    filing_format="pdf",
+                    cancel_event=cancel_event,
+                )
             except requests.HTTPError as exc:
                 http_status = _http_status_from_exception(exc) or http_status
                 return FetchedFinancialWorkItem(
@@ -513,13 +584,6 @@ def _fetch_company_work_item(
                     http_status=http_status,
                     started_monotonic=started,
                 )
-            raw_path = _save_raw_filing(
-                data_dir=data_dir,
-                company_number=target.company_number,
-                filing_id=filing.filing_id,
-                extension=PDF_EXTENSION,
-                content=content,
-            )
             return FetchedFinancialWorkItem(
                 row=_build_fetched_row(
                     target=target,
@@ -535,24 +599,30 @@ def _fetch_company_work_item(
             )
 
         try:
-            request_kwargs: dict[str, object] = {
-                "document_metadata_url": filing.document_metadata_url,
-                "accept": IXBRL_RESOURCE,
-            }
-            if cancel_event is not None:
-                request_kwargs["cancel_event"] = cancel_event
-            content = client.download_document_content(**request_kwargs)
+            content, raw_path = _document_bytes(
+                client=client,
+                data_dir=data_dir,
+                company_number=target.company_number,
+                filing_id=filing.filing_id,
+                document_metadata_url=filing.document_metadata_url,
+                accept=IXBRL_RESOURCE,
+                filing_format="ixbrl",
+                cancel_event=cancel_event,
+            )
         except requests.HTTPError as exc:
             http_status = _http_status_from_exception(exc) or http_status
             if http_status == 406:
                 try:
-                    request_kwargs = {
-                        "document_metadata_url": filing.document_metadata_url,
-                        "accept": PDF_RESOURCE,
-                    }
-                    if cancel_event is not None:
-                        request_kwargs["cancel_event"] = cancel_event
-                    content = client.download_document_content(**request_kwargs)
+                    content, raw_path = _document_bytes(
+                        client=client,
+                        data_dir=data_dir,
+                        company_number=target.company_number,
+                        filing_id=filing.filing_id,
+                        document_metadata_url=filing.document_metadata_url,
+                        accept=PDF_RESOURCE,
+                        filing_format="pdf",
+                        cancel_event=cancel_event,
+                    )
                 except requests.HTTPError as pdf_exc:
                     http_status = _http_status_from_exception(pdf_exc) or http_status
                     return FetchedFinancialWorkItem(
@@ -572,13 +642,6 @@ def _fetch_company_work_item(
                         http_status=http_status,
                         started_monotonic=started,
                     )
-                raw_path = _save_raw_filing(
-                    data_dir=data_dir,
-                    company_number=target.company_number,
-                    filing_id=filing.filing_id,
-                    extension=PDF_EXTENSION,
-                    content=content,
-                )
                 return FetchedFinancialWorkItem(
                     row=_build_fetched_row(
                         target=target,
@@ -610,13 +673,6 @@ def _fetch_company_work_item(
                 http_status=http_status,
                 started_monotonic=started,
             )
-        raw_path = _save_raw_filing(
-            data_dir=data_dir,
-            company_number=target.company_number,
-            filing_id=filing.filing_id,
-            extension=IXBRL_EXTENSION,
-            content=content,
-        )
         return FetchedFinancialWorkItem(
             row=_build_fetched_row(
                 target=target,

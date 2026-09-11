@@ -6,7 +6,18 @@ Uses [DuckDB](https://duckdb.org/) for fast CSV ingestion and analytical queries
 
 ## Install
 
-**Prerequisite:** Python 3.12 or newer. Check with `python3 --version`.
+**Prerequisites:**
+
+- Python 3.12 or newer. Check with `python3 --version`.
+- For the GUI (`ch-bulk ui`), that Python also needs Tkinter. Check with
+  `python3 -c "import tkinter"` — no output means it's there. Homebrew ships
+  Tk separately, so install the build matching your Python version:
+
+  ```bash
+  brew install python-tk@3.14   # match your `python3 --version`
+  ```
+
+  The CLI and Python API work without Tkinter; only the GUI needs it.
 
 ### Option A: pip install (simplest)
 
@@ -110,10 +121,15 @@ ch-bulk query 62012
 ```bash
 git clone https://github.com/nitkrar/ch_scraper.git
 cd ch_scraper
-python3 -m venv .venv
+./setup.sh
 source .venv/bin/activate
-pip install -e .
 ```
+
+`setup.sh` picks a suitable Python, builds `.venv` (rebuilding it if a previous
+one points at an interpreter that has since been upgraded or removed), installs
+the package, and verifies the CLI and GUI. If you'd rather do it by hand, note
+that a plain `python3 -m venv .venv` will silently give you a GUI-less install
+when the chosen Python lacks Tkinter — see the prerequisites above.
 
 2. Create your local settings file and fill in the API keys:
 
@@ -251,6 +267,15 @@ Full list: https://resources.companieshouse.gov.uk/sic/
 **"Python 3.12+ is required but not found"** — Install from https://www.python.org/downloads/
 
 **"command not found: ch-bulk"** — Run `source .venv/bin/activate` first
+
+**"no such file or directory: .venv/bin/python"** (or `ch-bulk` fails this way
+after a Homebrew upgrade) — The venv symlinks into a specific interpreter, and
+that interpreter was upgraded or uninstalled out from under it. Re-run
+`./setup.sh`; it detects the dead interpreter and rebuilds `.venv`.
+
+**"No module named '_tkinter'"** — Your Python has no Tk. Install the matching
+Homebrew package (`brew install python-tk@3.14`, matching `python3 --version`)
+and re-run `./setup.sh`.
 
 **Download is slow** — Companies House servers can be slow. Downloads resume automatically if interrupted — just run `ch-bulk download` again.
 

@@ -19,12 +19,18 @@ classifiers = [
 ]
 dependencies = [
     "beautifulsoup4>=4.12",
-    "httpx>=0.27",
+    # http2 extra is required: classifier_pipeline builds httpx.Client(http2=True),
+    # which needs the 'h2' package that plain httpx does not pull in.
+    "httpx[http2]>=0.27",
     "duckdb>=1.0",
     "ixbrlparse>=0.11.2",
+    # odfpy backs pd.read_excel(engine="odf") in ch_bulk/cqc/processor.py.
     "odfpy>=1.4.1",
+    "openpyxl>=3.1",
     "pandas>=2.2",
+    "pdf2image>=1.17",
     "pdfplumber>=0.11.9",
+    "pytesseract>=0.3.10",
     "rapidfuzz>=3.6",
     "requests>=2.32",
     "rich>=13.0",
@@ -35,6 +41,9 @@ dependencies = [
 [project.optional-dependencies]
 browser = [
     "playwright>=1.54",
+]
+dev = [
+    "pytest>=8.0",
 ]
 
 [project.urls]

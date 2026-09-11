@@ -362,13 +362,6 @@ class ParallelEnricherTests(unittest.TestCase):
             ensure_pipeline_schema(con)
             con.execute(
                 """
-                CREATE TABLE cqc_locations (
-                    location_id TEXT PRIMARY KEY
-                )
-                """
-            )
-            con.execute(
-                """
                 INSERT INTO companies VALUES
                     ('11111111', 'Alpha', 'SW1A 1AA', 'London', '88100', NULL, NULL, NULL),
                     ('22222222', 'Beta', 'SW1A 1AA', 'London', '88100', NULL, NULL, NULL)
@@ -376,9 +369,8 @@ class ParallelEnricherTests(unittest.TestCase):
             )
             con.execute(
                 """
-                INSERT INTO cqc_locations VALUES
-                    ('loc-1'),
-                    ('loc-2')
+                INSERT INTO cqc_locations (location_id)
+                VALUES ('loc-1'), ('loc-2')
                 """
             )
         finally:

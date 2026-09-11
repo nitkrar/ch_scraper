@@ -15,6 +15,7 @@ import requests
 
 from ch_bulk.core.paths import run_stage_file, runs_dir
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
+from ch_bulk.web import browser
 from ch_bulk.web.classifier import (
     StagedClassification,
     WebsiteClassifier,
@@ -663,6 +664,16 @@ class WebsiteClassifierTests(unittest.TestCase):
         self.assertEqual(summary["unable_count"], 1)
         fetch_rendered.assert_not_called()
 
+    # Unlike the other browser-fallback tests, this one does not patch
+    # browser.is_playwright_available(). The real gate in
+    # classifier_pipeline.py therefore runs, and without the optional
+    # browser extra installed it returns False, skipping the fallback and
+    # producing a misleading "unable_count != 0" assertion failure rather
+    # than a clear "playwright missing" signal. Skip instead.
+    @unittest.skipUnless(
+        browser.is_playwright_available(),
+        "requires the optional browser extra: pip install -e '.[browser]'",
+    )
     def test_classify_reuses_playwright_session_for_multiple_handoffs(self):
         db_path, tmpdir = self._create_db()
         con = duckdb.connect(str(db_path))

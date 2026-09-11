@@ -49,7 +49,8 @@ def _create_cqc_bulk_tables(con: duckdb.DuckDBPyConnection) -> None:
         """
         CREATE TABLE cqc_locations (
             location_id TEXT PRIMARY KEY,
-            provider_id TEXT
+            provider_id TEXT,
+            service_types TEXT
         )
         """
     )
@@ -71,7 +72,7 @@ class MigrationTests(unittest.TestCase):
         )
         con.execute(
             """
-            INSERT INTO cqc_locations VALUES
+            INSERT INTO cqc_locations (location_id, provider_id) VALUES
                 ('loc-1', 'prov-1')
             """
         )

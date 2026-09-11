@@ -1,7 +1,10 @@
 """Download published CQC bulk files from cqc.org.uk.
 
 The CQC publishes weekly CSV snapshots at URLs of the shape:
-    https://www.cqc.org.uk/sites/default/files/YYYY-MM/DD_Month_YYYY_CQC_directory.csv
+    https://www.cqc.org.uk/system/files/YYYY-MM/DD_Month_YYYY_CQC_directory.csv
+
+The files root has moved before (it was /sites/default/files/ until 2026), so
+both spellings are accepted and links may be absolute or site-relative.
 
 There's no stable "latest" alias — we scrape the listing page to find
 the current direct link, then download to <data_dir>/input/cqc/.
@@ -25,15 +28,37 @@ from ch_bulk.core.paths import cqc_input_dir
 
 logger = logging.getLogger(__name__)
 
+CQC_BASE_URL = "https://www.cqc.org.uk"
 CQC_LISTING_URL = "https://www.cqc.org.uk/about-us/transparency/using-cqc-data"
-CQC_FILENAME_RE = re.compile(
-    r"/sites/default/files/(\d{4}-\d{2})/(\d{1,2})_([A-Za-z]+)_(\d{4})_CQC_directory\.csv",
-    re.IGNORECASE,
-)
-HSCA_FILENAME_RE = re.compile(
-    r"/sites/default/files/(\d{4}-\d{2})/(\d{1,2})_([A-Za-z]+)_(\d{4})_HSCA_Active_Locations\.ods",
-    re.IGNORECASE,
-)
+
+# CQC's edge blocks httpx's default "python-httpx/x.y" user-agent with a bare
+# 403 on both the listing page and the asset URLs. Any conventional UA is let
+# through, so send one rather than leaving the downloader dead.
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    )
+}
+
+# Drupal serves published assets from a files root that CQC has changed once
+# already (/sites/default/files/ -> /system/files/). Accept either rather than
+# pinning to whichever is current.
+_FILES_ROOT = r"/(?:sites/default/files|system/files)"
+# Used only to make a failed match diagnosable.
+_ANY_ASSET_RE = re.compile(_FILES_ROOT + r"/[^\"'\s)>]+", re.IGNORECASE)
+
+
+def _asset_re(suffix: str) -> Pattern[str]:
+    """Build a matcher for a dated CQC asset, e.g. ``12_August_2026_CQC_directory.csv``."""
+    return re.compile(
+        _FILES_ROOT + r"/(\d{4}-\d{2})/(\d{1,2})_([A-Za-z]+)_(\d{4})_" + suffix,
+        re.IGNORECASE,
+    )
+
+
+CQC_FILENAME_RE = _asset_re(r"CQC_directory\.csv")
+HSCA_FILENAME_RE = _asset_re(r"HSCA_Active_Locations\.ods")
 _MONTH_NAMES = {
     "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
     "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
@@ -51,14 +76,25 @@ def _find_latest_asset_url(
 ) -> tuple[str, date]:
     """Scrape the CQC listing page for the latest matching bulk asset."""
     logger.info("Fetching CQC listing page: %s", CQC_LISTING_URL)
-    resp = httpx.get(CQC_LISTING_URL, timeout=60, follow_redirects=True)
+    resp = httpx.get(
+        CQC_LISTING_URL, timeout=60, follow_redirects=True, headers=_HTTP_HEADERS
+    )
     resp.raise_for_status()
 
     matches = list(filename_re.finditer(resp.text))
     if not matches:
+        # Report what the page actually offered. The failure mode here is CQC
+        # renaming or relocating assets, and naming the links we did see turns
+        # a guessing game into a one-line diff of the expected pattern.
+        seen = sorted({m.group(0) for m in _ANY_ASSET_RE.finditer(resp.text)})
+        detail = (
+            "Asset links present on the page:\n  " + "\n  ".join(seen[:15])
+            if seen
+            else "No asset links were found on the page at all."
+        )
         raise RuntimeError(
             f"No {label} link found on {CQC_LISTING_URL}. "
-            "Has the CQC page layout changed?"
+            f"Has the CQC page layout changed?\n{detail}"
         )
 
     candidates: list[tuple[date, str]] = []
@@ -113,7 +149,9 @@ def _download_asset(
         return target
 
     _notify(f"Downloading {url} → {target.name}...")
-    with httpx.stream("GET", url, timeout=120, follow_redirects=True) as r:
+    with httpx.stream(
+        "GET", url, timeout=120, follow_redirects=True, headers=_HTTP_HEADERS
+    ) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length", 0))
         written = 0

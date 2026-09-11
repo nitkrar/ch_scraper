@@ -197,6 +197,93 @@ class _NoopThrottle:
 
 
 class FinancialParserTests(unittest.TestCase):
+    def test_parse_ixbrl_bytes_drops_implausibly_large_employee_count(self):
+        """A staff-costs-sized figure must not survive as an employee count.
+
+        Observed on CH 11357496, where the OCR path read the staff-costs total
+        (1,579,539 + 158,550 + 22,163 = 1,760,252) out of the "Employees and
+        directors" note. Unbounded, that passes every downstream size filter
+        instead of reading as missing data.
+        """
+        rows = [
+            {
+                "name": "TurnoverRevenue",
+                "value": 10151720.0,
+                "startdate": "2025-01-01",
+                "enddate": "2025-12-31",
+            },
+            {
+                "name": "AverageNumberEmployeesDuringPeriod",
+                "value": 1760252,
+                "startdate": "2025-01-01",
+                "enddate": "2025-12-31",
+            },
+        ]
+
+        with patch(
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
+            return_value=_FakeIXBRLDocument(rows),
+        ):
+            facts = _parse_ixbrl_bytes(b"<html></html>")
+
+        self.assertEqual(facts.revenue, 10151720.0)
+        self.assertIsNone(facts.employee_count)
+
+    def test_parse_ixbrl_bytes_drops_negative_employee_count(self):
+        """A headcount tagged sign="-" must not be stored as a negative count.
+
+        Observed on CH 07384125, whose micro-entity filing tags
+        AverageNumberEmployeesDuringPeriod with sign="-" on 9.00. The iXBRL
+        spec says to negate, so the parser correctly yields -9; a headcount
+        cannot be negative, so it is dropped rather than stored.
+        """
+        rows = [
+            {
+                "name": "AverageNumberEmployeesDuringPeriod",
+                "value": -9,
+                "startdate": "2024-01-01",
+                "enddate": "2024-12-31",
+            },
+            {
+                "name": "NetAssetsLiabilities",
+                "value": 228421.0,
+                "instant": "2024-12-31",
+            },
+        ]
+
+        with patch(
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
+            return_value=_FakeIXBRLDocument(rows),
+        ):
+            facts = _parse_ixbrl_bytes(b"<html></html>")
+
+        self.assertIsNone(facts.employee_count)
+        self.assertEqual(facts.net_assets, 228421.0)
+
+    def test_parse_ixbrl_bytes_keeps_plausible_employee_count(self):
+        rows = [
+            {
+                "name": "TurnoverRevenue",
+                "value": 10151720.0,
+                "startdate": "2025-01-01",
+                "enddate": "2025-12-31",
+            },
+            {
+                "name": "AverageNumberEmployeesDuringPeriod",
+                "value": 240,
+                "startdate": "2025-01-01",
+                "enddate": "2025-12-31",
+            },
+        ]
+
+        with patch(
+            "ch_bulk.companies_house.financials_enricher.IXBRL",
+            return_value=_FakeIXBRLDocument(rows),
+        ):
+            facts = _parse_ixbrl_bytes(b"<html></html>")
+
+        self.assertEqual(facts.employee_count, 240)
+
     def test_parse_ixbrl_bytes_prefers_latest_non_segmented_values(self):
         rows = [
             {
@@ -710,6 +797,107 @@ class FinancialProcessTests(unittest.TestCase):
         self.assertEqual(result.row.parse_status, "pdf_no_text_layer")
         self.assertEqual(result.row.parse_failure_reason, "pdf_no_text_layer")
 
+    def _filing_history(self, transaction_id: str, *, paper_filed: bool) -> dict:
+        return {
+            "items": [
+                {
+                    "date": "2025-03-28",
+                    "type": "AA",
+                    "description": "accounts-with-accounts-type-total-exemption-full",
+                    "transaction_id": transaction_id,
+                    "paper_filed": paper_filed,
+                    "links": {
+                        "document_metadata": (
+                            "https://document-api.company-information.service.gov.uk"
+                            f"/document/{transaction_id}"
+                        )
+                    },
+                    "description_values": {"made_up_date": "2024-10-31"},
+                }
+            ]
+        }
+
+    def test_process_company_reuses_saved_ixbrl_instead_of_redownloading(self):
+        """A filing already on disk must not be fetched again.
+
+        Documents are immutable for a given filing_id, so re-running any mode
+        over companies we have already fetched should cost no API calls.
+        """
+        client = Mock()
+        client.get_filing_history.return_value = self._filing_history(
+            "cached-one", paper_filed=False
+        )
+        client.download_document_content.side_effect = AssertionError(
+            "download_document_content must not be called when a saved copy exists"
+        )
+
+        parsed_ok = ParsedFinancialFacts(
+            revenue=100.0,
+            employee_count=2,
+            filing_period_start=date(2025, 1, 1),
+            filing_period_end=date(2025, 12, 31),
+            gross_profit=None,
+            profit_before_tax=None,
+            profit_after_tax=None,
+            fixed_assets=None,
+            current_assets=None,
+            total_assets=None,
+            net_assets=None,
+            net_current_assets=None,
+            parse_status="ok",
+            parse_failure_reason=None,
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch(
+                "ch_bulk.companies_house.financials_enricher._parse_ixbrl_bytes",
+                return_value=parsed_ok,
+            ) as parse_ixbrl,
+        ):
+            cached = raw_filings_dir(tmpdir, "12345678") / "cached-one.ixbrl"
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(b"<html>cached</html>")
+
+            result = _process_company(
+                client,
+                target=FinancialTarget("12345678", date(2024, 10, 31)),
+                data_dir=tmpdir,
+            )
+
+        client.download_document_content.assert_not_called()
+        parse_ixbrl.assert_called_once_with(b"<html>cached</html>")
+        self.assertEqual(result.row.filing_format, "ixbrl")
+        self.assertEqual(result.row.filing_id, "cached-one")
+
+    def test_process_company_reuses_saved_pdf_instead_of_redownloading(self):
+        """Same guarantee for paper-filed PDFs, which are the largest downloads."""
+        client = Mock()
+        client.get_filing_history.return_value = self._filing_history(
+            "cached-pdf", paper_filed=True
+        )
+        client.download_document_content.side_effect = AssertionError(
+            "download_document_content must not be called when a saved copy exists"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cached = raw_filings_dir(tmpdir, "12345678") / "cached-pdf.pdf"
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(b"%PDF-1.1 cached")
+
+            result = _process_company(
+                client,
+                target=FinancialTarget("12345678", date(2024, 10, 31)),
+                data_dir=tmpdir,
+            )
+
+            # The saved copy must be served as-is, not re-fetched or rewritten.
+            self.assertEqual(cached.read_bytes(), b"%PDF-1.1 cached")
+
+        client.download_document_content.assert_not_called()
+        self.assertEqual(result.row.filing_format, "pdf")
+        self.assertEqual(result.row.filing_id, "cached-pdf")
+
     def test_process_company_retries_406_ixbrl_as_pdf_no_text_layer(self):
         client = Mock()
         client.get_filing_history.return_value = {
@@ -922,6 +1110,40 @@ class FinancialTargetSelectionTests(unittest.TestCase):
             ["10000002", "10000003", "10000004"],
         )
         self.assertEqual(targets[0].accounts_last_made_up, date(2026, 2, 28))
+
+    def test_select_targets_incremental_skips_ocr_extracted_rows(self):
+        """OCR-extracted financials must be terminal.
+
+        A scanned PDF stays scanned, so re-fetching one can only overwrite the
+        OCR-derived figures with pdf_no_text_layer again. Without this the
+        next incremental run silently destroys the extraction.
+        """
+        con = duckdb.connect()
+        try:
+            _create_companies_table(con)
+            ensure_pipeline_schema(con)
+            _insert_company(
+                con,
+                company_number="10000009",
+                company_name="OCR Extracted Ltd",
+                accounts_last_made_up=date(2026, 6, 30),
+            )
+            _insert_match(con, company_number="10000009", provider_id="prov-9")
+            con.execute(
+                """
+                INSERT INTO company_enrichment (
+                    company_number, revenue, revenue_source, employee_count, last_enriched_at
+                ) VALUES (
+                    '10000009', 11481000, 'filed_accounts_pdf_ocr', 98,
+                    TIMESTAMP '2026-05-25 12:00:00'
+                )
+                """
+            )
+            targets = _select_targets(con, mode="incremental", ids=None)
+        finally:
+            con.close()
+
+        self.assertEqual([t.company_number for t in targets], [])
 
     def test_select_targets_incremental_skips_saved_raw_files_on_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:

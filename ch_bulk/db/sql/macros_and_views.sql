@@ -90,6 +90,16 @@ CREATE OR REPLACE MACRO size_score(revenue) AS (
     END
 );
 
+CREATE OR REPLACE MACRO cqc_class_score(has_homecare, has_supported_living, has_residential) AS (
+    CASE
+        WHEN has_homecare AND NOT has_supported_living AND NOT has_residential THEN 3
+        WHEN has_homecare AND has_supported_living AND NOT has_residential THEN 2
+        WHEN has_homecare AND has_residential THEN 1
+        WHEN NOT has_homecare AND has_supported_living AND NOT has_residential THEN 1
+        ELSE 0
+    END
+);
+
 CREATE OR REPLACE MACRO tier_for(total, class_pts) AS (
     CASE
         WHEN class_pts = 0 OR total = 0 THEN 'Excluded'
@@ -194,7 +204,20 @@ FROM ranked
 WHERE priority = 1;
 
 CREATE OR REPLACE VIEW tiered_targets AS
-WITH base AS (
+WITH cqc_service_mix AS (
+    SELECT
+        m.company_number,
+        BOOL_OR(l.service_types LIKE '%Homecare%') AS has_homecare,
+        BOOL_OR(l.service_types LIKE '%Supported living%') AS has_supported_living,
+        BOOL_OR(
+            l.service_types LIKE '%Residential%'
+            OR l.service_types LIKE '%Nursing home%'
+        ) AS has_residential
+    FROM current_company_match m
+    JOIN cqc_locations l ON l.provider_id = m.cqc_provider_id
+    GROUP BY m.company_number
+),
+base AS (
     SELECT
         c.company_number,
         c.company_name,
@@ -216,6 +239,11 @@ WITH base AS (
         m.status AS match_status,
         m.total_score AS match_score,
         class_score(cls.verdict) AS class_pts,
+        cqc_class_score(
+            COALESCE(csm.has_homecare, FALSE),
+            COALESCE(csm.has_supported_living, FALSE),
+            COALESCE(csm.has_residential, FALSE)
+        ) AS cqc_class_pts,
         age_score(
             ce.avg_director_age,
             ce.directors_over_60,
@@ -226,6 +254,7 @@ WITH base AS (
     INNER JOIN current_company_match m USING (company_number)
     LEFT JOIN company_enrichment ce USING (company_number)
     LEFT JOIN company_current_classification cls USING (company_number)
+    LEFT JOIN cqc_service_mix csm USING (company_number)
     WHERE c.company_number NOT IN (
         SELECT ec.company_number
         FROM excluded_companies ec
@@ -236,7 +265,8 @@ WITH base AS (
 scored AS (
     SELECT
         *,
-        class_pts + age_pts + size_pts AS total_score
+        GREATEST(class_pts, cqc_class_pts) AS effective_class_pts,
+        GREATEST(class_pts, cqc_class_pts) + age_pts + size_pts AS total_score
     FROM base
 )
 SELECT
@@ -260,8 +290,10 @@ SELECT
     match_status,
     match_score,
     class_pts,
+    cqc_class_pts,
+    effective_class_pts,
     age_pts,
     size_pts,
     total_score,
-    tier_for(total_score, class_pts) AS tier
+    tier_for(total_score, effective_class_pts) AS tier
 FROM scored;
