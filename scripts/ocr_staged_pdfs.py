@@ -1,6 +1,6 @@
 """OCR + filter sidecar producer for staged Companies House PDFs.
 
-Scans data/staging/filings/<cn>/<filing_id>.pdf, and for each PDF:
+Scans data/staging/raw/companies_house/filings/<cn>/<filing_id>.pdf, and for each PDF:
 
   1. If <filing_id>.ocr.txt does not exist, run OCR (pdf2image + tesseract)
      and write all-pages text to <filing_id>.ocr.txt
@@ -15,7 +15,7 @@ staged PDFs.
 
 Usage:
     python scripts/ocr_staged_pdfs.py \\
-        --staging-dir data/staging/filings \\
+        --staging-dir data/staging/raw/companies_house/filings \\
         --limit 0        # 0 = unlimited
         --workers 1      # parallel PDFs (tesseract is CPU-bound; >1 if cores available)
 """
@@ -138,9 +138,9 @@ def process_pdf(pdf_path: Path, dpi: int = OCR_DPI) -> dict:
 
 
 def _default_staging_dir() -> Path:
-    from ch_bulk.core.paths import raw_dir
+    from ch_bulk.core.paths import DEFAULT_DATA_DIR, raw_dir
 
-    return raw_dir("data", "companies_house") / "filings"
+    return raw_dir(DEFAULT_DATA_DIR, "companies_house") / "filings"
 
 
 def discover_pdfs(staging_dir: Path) -> list[Path]:
