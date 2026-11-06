@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import zipfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -38,6 +39,16 @@ def _zip_filename(month: str, part: int) -> str:
         Filename like ``BasicCompanyData-2026-04-01-part1_7.zip``.
     """
     return f"BasicCompanyData-{month}-01-part{part}_{PARTS}.zip"
+
+
+def _extracted_csv(target_dir: Path, zip_filename: str) -> Path | None:
+    """Return the part's CSV if a previous run already extracted it.
+
+    ZIPs are deleted after extraction, so the CSV is the only record that
+    a part is done. Extraction is atomic, so an existing CSV is complete.
+    """
+    csv_path = target_dir / zip_filename.replace(".zip", ".csv")
+    return csv_path if csv_path.is_file() else None
 
 
 def _detect_month() -> str:
@@ -198,7 +209,16 @@ def _extract_zip(zip_path: Path, extract_dir: Path) -> list[Path]:
                             name,
                         )
                         continue
-                    zf.extract(name, extract_dir)
+                    # Write to a temp name and rename, so an interrupted
+                    # extraction never leaves a CSV that looks complete.
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_target = target.with_name(target.name + ".partial")
+                    try:
+                        with zf.open(name) as src, open(tmp_target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        tmp_target.replace(target)
+                    finally:
+                        tmp_target.unlink(missing_ok=True)
                     csv_files.append(extract_dir / name)
                     logger.info("Extracted: %s", name)
     except zipfile.BadZipFile:
@@ -270,6 +290,15 @@ def download_bulk_data(
                 url = f"{BASE_URL}/{filename}"
                 dest = target_dir / filename
 
+                existing_csv = _extracted_csv(target_dir, filename)
+                if existing_csv is not None:
+                    progress_callback(f"Part {part}/{PARTS} already downloaded")
+                    logger.info("Already extracted: %s", existing_csv.name)
+                    all_csv_files.append(existing_csv)
+                    if not keep_zips:
+                        dest.unlink(missing_ok=True)
+                    continue
+
                 progress_callback(f"Downloading part {part}/{PARTS}: {filename}")
 
                 last_exc: httpx.HTTPError | None = None
@@ -304,6 +333,14 @@ def download_bulk_data(
                     url = f"{BASE_URL}/{filename}"
                     dest = target_dir / filename
 
+                    existing_csv = _extracted_csv(target_dir, filename)
+                    if existing_csv is not None:
+                        logger.info("Already extracted: %s", existing_csv.name)
+                        all_csv_files.append(existing_csv)
+                        if not keep_zips:
+                            dest.unlink(missing_ok=True)
+                        continue
+
                     last_exc = None
                     for attempt in range(1, _MAX_DOWNLOAD_RETRIES + 1):
                         try:
@@ -329,9 +366,10 @@ def download_bulk_data(
                         raise last_exc
 
     # Extract all ZIPs
-    if progress_callback:
-        progress_callback("Extracting ZIP files...")
-    logger.info("Extracting ZIP files...")
+    if zip_paths:
+        if progress_callback:
+            progress_callback("Extracting ZIP files...")
+        logger.info("Extracting ZIP files...")
     for zip_path in zip_paths:
         csv_files = _extract_zip(zip_path, target_dir)
         if not csv_files and strict:

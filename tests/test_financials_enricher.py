@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import duckdb
 import requests
+from bs4 import BeautifulSoup
 from typer.testing import CliRunner
 
 from ch_bulk.core.paths import raw_filings_dir, run_stage_file, runs_dir
@@ -148,6 +149,10 @@ def _copy_sample_ixbrl(
 class _FakeIXBRLDocument:
     def __init__(self, rows):
         self._rows = rows
+        # No displayed text or document body: headcounts and turnover come
+        # from the tagged rows only.
+        self.numeric = []
+        self.soup = BeautifulSoup("", "xml")
 
     def to_table(self, *, fields: str):
         if fields != "numeric":
@@ -229,13 +234,13 @@ class FinancialParserTests(unittest.TestCase):
         self.assertEqual(facts.revenue, 10151720.0)
         self.assertIsNone(facts.employee_count)
 
-    def test_parse_ixbrl_bytes_drops_negative_employee_count(self):
-        """A headcount tagged sign="-" must not be stored as a negative count.
+    def test_parse_ixbrl_bytes_uses_magnitude_of_negative_employee_count(self):
+        """A headcount tagged sign="-" is stored as its magnitude.
 
         Observed on CH 07384125, whose micro-entity filing tags
         AverageNumberEmployeesDuringPeriod with sign="-" on 9.00. The iXBRL
-        spec says to negate, so the parser correctly yields -9; a headcount
-        cannot be negative, so it is dropped rather than stored.
+        spec says to negate, so the parser yields -9; a headcount cannot be
+        negative, and the displayed 9 is the real count.
         """
         rows = [
             {
@@ -257,7 +262,7 @@ class FinancialParserTests(unittest.TestCase):
         ):
             facts = _parse_ixbrl_bytes(b"<html></html>")
 
-        self.assertIsNone(facts.employee_count)
+        self.assertEqual(facts.employee_count, 9)
         self.assertEqual(facts.net_assets, 228421.0)
 
     def test_parse_ixbrl_bytes_keeps_plausible_employee_count(self):
@@ -2499,6 +2504,49 @@ class FinancialStagingTests(unittest.TestCase):
             )
         finally:
             con.close()
+
+class FinancialsCancelBeforeFirstRowTests(unittest.TestCase):
+    def test_cancel_before_any_row_is_staged_reports_cancelled(self) -> None:
+        from ch_bulk.companies_house.company_profile import ensure_companies_table
+        from ch_bulk.core.cancellation import OperationCancelled
+        from ch_bulk.core.settings import settings_path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            db_path = data_dir / "fin.duckdb"
+            settings = settings_path(data_dir)
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(json.dumps({"api_keys": {"companies_house": "test-key"}}))
+            con = duckdb.connect(str(db_path))
+            try:
+                ensure_companies_table(con)
+                con.execute(
+                    "INSERT INTO companies (company_number, company_name) "
+                    "VALUES ('00000001', 'A'), ('00000002', 'B')"
+                )
+            finally:
+                con.close()
+
+            cancel_event = threading.Event()
+            cancel_event.set()
+            with self.assertRaises(OperationCancelled):
+                enrich_financials(
+                    db_path,
+                    data_dir,
+                    mode="list",
+                    ids=["00000001", "00000002"],
+                    cancel_event=cancel_event,
+                )
+
+            con = duckdb.connect(str(db_path))
+            try:
+                statuses = con.execute(
+                    "SELECT status FROM cqc_sync_batches WHERE sync_type = 'financials'"
+                ).fetchall()
+            finally:
+                con.close()
+            self.assertEqual(statuses, [("cancelled",)])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,11 @@ from ch_bulk.db.sync_batches import finish_sync_batch, utcnow_naive
 
 logger = logging.getLogger(__name__)
 
+# A staged row that parsed a filing ("replacing") overwrites every financial
+# column, NULLs included, so no figure from an older filing survives next to
+# the new one. A re-fetch of a scanned filing whose figures were recovered by
+# OCR leaves the stored figures untouched. Other rows (no filing, fetch/parse
+# errors) only fill gaps.
 FINANCIALS_INSERT_SQL = """
 WITH staged AS (
     SELECT
@@ -61,12 +66,29 @@ WITH staged AS (
         TRY_CAST(raw.total_assets AS DOUBLE) AS total_assets,
         TRY_CAST(raw.net_assets AS DOUBLE) AS net_assets,
         TRY_CAST(raw.net_current_assets AS DOUBLE) AS net_current_assets,
+        TRY_CAST(raw.debtors AS DOUBLE) AS debtors,
+        TRY_CAST(raw.creditors_within_one_year AS DOUBLE) AS creditors_within_one_year,
+        TRY_CAST(raw.creditors_after_one_year AS DOUBLE) AS creditors_after_one_year,
+        TRY_CAST(raw.provisions_for_liabilities AS DOUBLE) AS provisions_for_liabilities,
+        TRY_CAST(raw.deferred_tax AS DOUBLE) AS deferred_tax,
         TRY_CAST(raw.filing_age_months AS INTEGER) AS filing_age_months,
         NULLIF(CAST(raw.parse_status AS VARCHAR), '') AS parse_status,
         NULLIF(CAST(raw.parse_failure_reason AS VARCHAR), '') AS parse_failure_reason,
         COALESCE(TRY_CAST(raw.profit_loss_exempt AS BOOLEAN), FALSE) AS profit_loss_exempt,
         CAST(raw.fetched_at AS TIMESTAMP) AS fetched_at
-    FROM read_json_auto(?, format='newline_delimited') AS raw
+    FROM (
+        SELECT * FROM read_json_auto(?, format='newline_delimited')
+        -- Staging files written before the balance-sheet fields existed
+        -- lack those keys; this supplies them as NULL columns.
+        UNION ALL BY NAME
+        SELECT
+            NULL::DOUBLE AS debtors,
+            NULL::DOUBLE AS creditors_within_one_year,
+            NULL::DOUBLE AS creditors_after_one_year,
+            NULL::DOUBLE AS provisions_for_liabilities,
+            NULL::DOUBLE AS deferred_tax
+        WHERE FALSE
+    ) AS raw
 ),
 deduped AS (
     SELECT * EXCLUDE (row_num)
@@ -80,6 +102,67 @@ deduped AS (
         FROM staged
     )
     WHERE row_num = 1
+),
+ocr_protected AS (
+    SELECT
+        d.*,
+        (
+            d.parse_status = 'pdf_no_text_layer'
+            AND coalesce(d.filing_id = e.filing_id, FALSE)
+            AND coalesce(e.revenue_source IN (
+                'filed_accounts_ocr_pdf',
+                'partial_ocr_no_pl',
+                'filed_accounts_pdf_ocr'
+            ), FALSE)
+        ) AS is_ocr_protected
+    FROM deduped d
+    LEFT JOIN company_enrichment e USING (company_number)
+),
+classified AS (
+    SELECT
+        d.*,
+        (
+            d.filing_id IS NOT NULL
+            AND coalesce(d.parse_status, '') NOT IN (
+                'request_error',
+                'document_metadata_error',
+                'document_download_error',
+                'no_document_resource',
+                'ixbrl_parse_error',
+                'pdf_parse_error'
+            )
+            AND NOT d.is_ocr_protected
+        ) AS is_replacing,
+        (
+            d.parse_status = 'partial'
+            AND coalesce(d.profit_loss_exempt, FALSE)
+            AND d.revenue IS NULL
+            AND d.gross_profit IS NULL
+            AND d.profit_before_tax IS NULL
+            AND d.profit_after_tax IS NULL
+            AND (
+                d.employee_count IS NOT NULL
+                OR d.net_assets IS NOT NULL
+                OR d.total_assets IS NOT NULL
+                OR d.net_current_assets IS NOT NULL
+            )
+        ) AS is_partial_no_revenue,
+        (
+            d.parse_status = 'partial'
+            AND NOT coalesce(d.profit_loss_exempt, FALSE)
+            AND lower(coalesce(d.filing_format, '')) = 'ocr_pdf'
+            AND d.revenue IS NULL
+            AND d.gross_profit IS NULL
+            AND d.profit_before_tax IS NULL
+            AND d.profit_after_tax IS NULL
+            AND (
+                d.employee_count IS NOT NULL
+                OR d.net_assets IS NOT NULL
+                OR d.total_assets IS NOT NULL
+                OR d.net_current_assets IS NOT NULL
+            )
+        ) AS is_partial_ocr_no_pl
+    FROM ocr_protected d
 )
 INSERT OR REPLACE INTO company_enrichment (
     company_number,
@@ -102,6 +185,11 @@ INSERT OR REPLACE INTO company_enrichment (
     total_assets,
     net_assets,
     net_current_assets,
+    debtors,
+    creditors_within_one_year,
+    creditors_after_one_year,
+    provisions_for_liabilities,
+    deferred_tax,
     filing_id,
     filing_format,
     filing_age_months,
@@ -115,30 +203,29 @@ SELECT
     e.directors_over_60,
     e.all_directors_60_plus,
     e.directors_dob_years,
-    COALESCE(d.revenue, e.revenue) AS revenue,
+    CASE WHEN d.is_replacing THEN d.revenue WHEN d.is_ocr_protected THEN e.revenue ELSE COALESCE(d.revenue, e.revenue) END AS revenue,
     CASE
+        WHEN d.is_ocr_protected
+            THEN e.revenue_source
         WHEN d.revenue IS NOT NULL AND lower(coalesce(d.filing_format, '')) = 'ixbrl'
             THEN 'filed_accounts_ixbrl'
         WHEN d.revenue IS NOT NULL AND lower(coalesce(d.filing_format, '')) = 'pdf'
             THEN 'filed_accounts_pdf'
         WHEN d.revenue IS NOT NULL AND lower(coalesce(d.filing_format, '')) = 'ocr_pdf'
             THEN 'filed_accounts_ocr_pdf'
+        WHEN d.is_replacing AND d.parse_status = 'pdf_no_text_layer'
+            THEN 'pdf_no_text_layer'
+        WHEN d.is_replacing AND d.is_partial_no_revenue
+            THEN 'partial_no_revenue'
+        WHEN d.is_replacing AND d.is_partial_ocr_no_pl
+            THEN 'partial_ocr_no_pl'
+        WHEN d.is_replacing
+            THEN NULL
         WHEN d.parse_status = 'pdf_no_text_layer'
              AND e.revenue IS NULL
              AND e.revenue_source IS NULL
             THEN 'pdf_no_text_layer'
-        WHEN d.parse_status = 'partial'
-             AND coalesce(d.profit_loss_exempt, FALSE)
-             AND d.revenue IS NULL
-             AND d.gross_profit IS NULL
-             AND d.profit_before_tax IS NULL
-             AND d.profit_after_tax IS NULL
-             AND (
-                d.employee_count IS NOT NULL
-                OR d.net_assets IS NOT NULL
-                OR d.total_assets IS NOT NULL
-                OR d.net_current_assets IS NOT NULL
-             )
+        WHEN d.is_partial_no_revenue
              AND (e.revenue_source IS NULL OR e.revenue_source IN (
                 'filed_accounts_ixbrl',
                 'filed_accounts_pdf',
@@ -147,19 +234,7 @@ SELECT
                 'pdf_no_text_layer'
              ))
             THEN 'partial_no_revenue'
-        WHEN d.parse_status = 'partial'
-             AND NOT coalesce(d.profit_loss_exempt, FALSE)
-             AND lower(coalesce(d.filing_format, '')) = 'ocr_pdf'
-             AND d.revenue IS NULL
-             AND d.gross_profit IS NULL
-             AND d.profit_before_tax IS NULL
-             AND d.profit_after_tax IS NULL
-             AND (
-                d.employee_count IS NOT NULL
-                OR d.net_assets IS NOT NULL
-                OR d.total_assets IS NOT NULL
-                OR d.net_current_assets IS NOT NULL
-             )
+        WHEN d.is_partial_ocr_no_pl
              AND (e.revenue_source IS NULL OR e.revenue_source IN (
                 'filed_accounts_ixbrl',
                 'filed_accounts_pdf',
@@ -171,24 +246,31 @@ SELECT
             THEN 'partial_ocr_no_pl'
         WHEN d.parse_status = 'no_filing' AND e.revenue IS NULL AND e.revenue_source IS NULL
             THEN 'no_recent_filing'
+        WHEN d.filing_id IS NOT NULL AND e.revenue_source = 'no_recent_filing'
+            THEN NULL
         ELSE e.revenue_source
     END AS revenue_source,
-    COALESCE(d.employee_count, e.employee_count) AS employee_count,
-    COALESCE(d.filing_period_start, e.filing_period_start) AS filing_period_start,
-    COALESCE(d.filing_period_end, e.filing_period_end) AS filing_period_end,
-    COALESCE(d.gross_profit, e.gross_profit) AS gross_profit,
-    COALESCE(d.profit_before_tax, e.profit_before_tax) AS profit_before_tax,
-    COALESCE(d.profit_after_tax, e.profit_after_tax) AS profit_after_tax,
-    COALESCE(d.fixed_assets, e.fixed_assets) AS fixed_assets,
-    COALESCE(d.current_assets, e.current_assets) AS current_assets,
-    COALESCE(d.total_assets, e.total_assets) AS total_assets,
-    COALESCE(d.net_assets, e.net_assets) AS net_assets,
-    COALESCE(d.net_current_assets, e.net_current_assets) AS net_current_assets,
-    COALESCE(d.filing_id, e.filing_id) AS filing_id,
-    COALESCE(d.filing_format, e.filing_format) AS filing_format,
-    COALESCE(d.filing_age_months, e.filing_age_months) AS filing_age_months,
+    CASE WHEN d.is_replacing THEN d.employee_count WHEN d.is_ocr_protected THEN e.employee_count ELSE COALESCE(d.employee_count, e.employee_count) END AS employee_count,
+    CASE WHEN d.is_replacing THEN d.filing_period_start WHEN d.is_ocr_protected THEN e.filing_period_start ELSE COALESCE(d.filing_period_start, e.filing_period_start) END AS filing_period_start,
+    CASE WHEN d.is_replacing THEN d.filing_period_end WHEN d.is_ocr_protected THEN e.filing_period_end ELSE COALESCE(d.filing_period_end, e.filing_period_end) END AS filing_period_end,
+    CASE WHEN d.is_replacing THEN d.gross_profit WHEN d.is_ocr_protected THEN e.gross_profit ELSE COALESCE(d.gross_profit, e.gross_profit) END AS gross_profit,
+    CASE WHEN d.is_replacing THEN d.profit_before_tax WHEN d.is_ocr_protected THEN e.profit_before_tax ELSE COALESCE(d.profit_before_tax, e.profit_before_tax) END AS profit_before_tax,
+    CASE WHEN d.is_replacing THEN d.profit_after_tax WHEN d.is_ocr_protected THEN e.profit_after_tax ELSE COALESCE(d.profit_after_tax, e.profit_after_tax) END AS profit_after_tax,
+    CASE WHEN d.is_replacing THEN d.fixed_assets WHEN d.is_ocr_protected THEN e.fixed_assets ELSE COALESCE(d.fixed_assets, e.fixed_assets) END AS fixed_assets,
+    CASE WHEN d.is_replacing THEN d.current_assets WHEN d.is_ocr_protected THEN e.current_assets ELSE COALESCE(d.current_assets, e.current_assets) END AS current_assets,
+    CASE WHEN d.is_replacing THEN d.total_assets WHEN d.is_ocr_protected THEN e.total_assets ELSE COALESCE(d.total_assets, e.total_assets) END AS total_assets,
+    CASE WHEN d.is_replacing THEN d.net_assets WHEN d.is_ocr_protected THEN e.net_assets ELSE COALESCE(d.net_assets, e.net_assets) END AS net_assets,
+    CASE WHEN d.is_replacing THEN d.net_current_assets WHEN d.is_ocr_protected THEN e.net_current_assets ELSE COALESCE(d.net_current_assets, e.net_current_assets) END AS net_current_assets,
+    CASE WHEN d.is_replacing THEN d.debtors WHEN d.is_ocr_protected THEN e.debtors ELSE COALESCE(d.debtors, e.debtors) END AS debtors,
+    CASE WHEN d.is_replacing THEN d.creditors_within_one_year WHEN d.is_ocr_protected THEN e.creditors_within_one_year ELSE COALESCE(d.creditors_within_one_year, e.creditors_within_one_year) END AS creditors_within_one_year,
+    CASE WHEN d.is_replacing THEN d.creditors_after_one_year WHEN d.is_ocr_protected THEN e.creditors_after_one_year ELSE COALESCE(d.creditors_after_one_year, e.creditors_after_one_year) END AS creditors_after_one_year,
+    CASE WHEN d.is_replacing THEN d.provisions_for_liabilities WHEN d.is_ocr_protected THEN e.provisions_for_liabilities ELSE COALESCE(d.provisions_for_liabilities, e.provisions_for_liabilities) END AS provisions_for_liabilities,
+    CASE WHEN d.is_replacing THEN d.deferred_tax WHEN d.is_ocr_protected THEN e.deferred_tax ELSE COALESCE(d.deferred_tax, e.deferred_tax) END AS deferred_tax,
+    CASE WHEN d.is_replacing THEN d.filing_id WHEN d.is_ocr_protected THEN e.filing_id ELSE COALESCE(d.filing_id, e.filing_id) END AS filing_id,
+    CASE WHEN d.is_replacing THEN d.filing_format WHEN d.is_ocr_protected THEN e.filing_format ELSE COALESCE(d.filing_format, e.filing_format) END AS filing_format,
+    CASE WHEN d.is_replacing THEN d.filing_age_months WHEN d.is_ocr_protected THEN e.filing_age_months ELSE COALESCE(d.filing_age_months, e.filing_age_months) END AS filing_age_months,
     COALESCE(d.fetched_at, e.last_enriched_at, CURRENT_TIMESTAMP) AS last_enriched_at
-FROM deduped d
+FROM classified d
 LEFT JOIN company_enrichment e USING (company_number)
 """
 
@@ -202,10 +284,10 @@ SELECT
         WHERE coalesce(parse_status, '') IN ('partial', 'pdf_parse_partial')
     ) AS partial_count,
     COUNT(*) FILTER (
-        WHERE lower(coalesce(filing_format, '')) = 'ixbrl'
+        WHERE lower(coalesce(CAST(filing_format AS VARCHAR), '')) = 'ixbrl'
     ) AS ixbrl_count,
     COUNT(*) FILTER (
-        WHERE lower(coalesce(filing_format, '')) IN ('pdf', 'ocr_pdf')
+        WHERE lower(coalesce(CAST(filing_format AS VARCHAR), '')) IN ('pdf', 'ocr_pdf')
     ) AS pdf_count,
     COUNT(*) FILTER (
         WHERE coalesce(parse_status, '') = 'pdf_no_text_layer'
@@ -226,6 +308,7 @@ SELECT
             'no_document_resource'
         )
     ) AS error_count
+-- CAST: a batch where every filing_format is null infers the column as JSON.
 FROM read_json_auto(?, format='newline_delimited')
 """
 
@@ -279,6 +362,11 @@ def _build_row(
         parse_failure_reason=facts.parse_failure_reason,
         fetched_at=fetched_at or isoformat_utc(),
         profit_loss_exempt=facts.profit_loss_exempt,
+        debtors=facts.debtors,
+        creditors_within_one_year=facts.creditors_within_one_year,
+        creditors_after_one_year=facts.creditors_after_one_year,
+        provisions_for_liabilities=facts.provisions_for_liabilities,
+        deferred_tax=facts.deferred_tax,
     )
 
 
@@ -444,8 +532,17 @@ def _archive_financials_fetch_manifest(
         mark_staging_file_loaded(path)
 
 
+def _staging_file_has_rows(path: str | Path) -> bool:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        return any(line.strip() for line in handle)
+
+
 def _scan_staged_financials_file(path: str | Path) -> FinancialsFileStats:
     _salvage_truncated_staging_file(path)
+    # read_json cannot infer columns from an empty file, so a run cancelled
+    # before its first row would otherwise fail here instead of cancelling.
+    if not _staging_file_has_rows(path):
+        return FinancialsFileStats(0, 0, 0, 0, 0, 0, 0, 0, 0)
     con = duckdb.connect(":memory:")
     try:
         row = con.execute(
@@ -535,7 +632,8 @@ def _load_financials_staging_file(
         ensure_pipeline_schema(con)
         con.execute("BEGIN TRANSACTION")
         try:
-            con.execute(FINANCIALS_INSERT_SQL, [str(path)])
+            if staged_stats.total_rows:
+                con.execute(FINANCIALS_INSERT_SQL, [str(path)])
             finish_sync_batch(
                 con,
                 batch_id,

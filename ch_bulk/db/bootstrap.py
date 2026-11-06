@@ -235,6 +235,16 @@ def ensure_enrichment_columns(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def ensure_companies_record_source(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure ``companies.record_source`` exists ('api' rows; NULL = bulk)."""
+    _ensure_column(
+        con,
+        table_name="companies",
+        column_name="record_source",
+        column_type="TEXT",
+    )
+
+
 def ensure_pipeline_schema(con: duckdb.DuckDBPyConnection) -> None:
     """Create the homecare pipeline schema objects if they are missing.
 
@@ -329,6 +339,19 @@ def ensure_pipeline_schema(con: duckdb.DuckDBPyConnection) -> None:
             column_name="net_current_assets",
             column_type="DOUBLE",
         )
+        for column_name in (
+            "debtors",
+            "creditors_within_one_year",
+            "creditors_after_one_year",
+            "provisions_for_liabilities",
+            "deferred_tax",
+        ):
+            _ensure_column(
+                con,
+                table_name="company_enrichment",
+                column_name=column_name,
+                column_type="DOUBLE",
+            )
         _ensure_column(
             con,
             table_name="company_enrichment",

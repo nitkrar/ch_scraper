@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from ch_bulk.companies_house.financials_contracts import (
     IXBRL_RESOURCE,
     PDF_EXTENSION,
     PDF_RESOURCE,
+    ZIP_RESOURCE,
     FILED_REVENUE_SOURCES,
     TERMINAL_REVENUE_SOURCES,
 )
@@ -482,6 +485,46 @@ def _document_bytes(
     return content, saved
 
 
+class ZipWithoutAccountsError(ValueError):
+    pass
+
+
+def _accounts_from_zip(content: bytes) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        for name in archive.namelist():
+            parts = name.lower().split("/")
+            if "accounts" in parts[:-1] and parts[-1].endswith((".xhtml", ".html")):
+                return archive.read(name)
+    raise ZipWithoutAccountsError("zip_without_accounts")
+
+
+def _zipped_accounts_bytes(
+    *,
+    client: Any,
+    data_dir: str | Path,
+    company_number: str,
+    filing_id: str,
+    document_metadata_url: str,
+    cancel_event: threading.Event | None,
+) -> tuple[bytes, Path]:
+    """Download a zip-packaged filing and save its accounts as the iXBRL copy."""
+    request_kwargs: dict[str, object] = {
+        "document_metadata_url": document_metadata_url,
+        "accept": ZIP_RESOURCE,
+    }
+    if cancel_event is not None:
+        request_kwargs["cancel_event"] = cancel_event
+    content = _accounts_from_zip(client.download_document_content(**request_kwargs))
+    saved = _save_raw_filing(
+        data_dir=data_dir,
+        company_number=company_number,
+        filing_id=filing_id,
+        extension=IXBRL_EXTENSION,
+        content=content,
+    )
+    return content, saved
+
+
 def _build_fetched_row(
     *,
     target: FinancialTarget,
@@ -625,6 +668,46 @@ def _fetch_company_work_item(
                     )
                 except requests.HTTPError as pdf_exc:
                     http_status = _http_status_from_exception(pdf_exc) or http_status
+                    failure_reason = (
+                        f"http_status_{http_status}"
+                        if http_status is not None
+                        else "http_error"
+                    )
+                    if http_status == 406:
+                        try:
+                            content, raw_path = _zipped_accounts_bytes(
+                                client=client,
+                                data_dir=data_dir,
+                                company_number=target.company_number,
+                                filing_id=filing.filing_id,
+                                document_metadata_url=filing.document_metadata_url,
+                                cancel_event=cancel_event,
+                            )
+                        except requests.HTTPError as zip_exc:
+                            http_status = (
+                                _http_status_from_exception(zip_exc) or http_status
+                            )
+                            failure_reason = f"http_status_{http_status}"
+                        except (ZipWithoutAccountsError, zipfile.BadZipFile) as zip_exc:
+                            failure_reason = (
+                                str(zip_exc)
+                                if isinstance(zip_exc, ZipWithoutAccountsError)
+                                else "bad_zip"
+                            )
+                        else:
+                            return FetchedFinancialWorkItem(
+                                row=_build_fetched_row(
+                                    target=target,
+                                    filing=filing,
+                                    paper_filed=filing.paper_filed,
+                                    filing_format="ixbrl",
+                                    raw_path=str(raw_path),
+                                    parse_status=None,
+                                    parse_failure_reason=None,
+                                ),
+                                http_status=200,
+                                started_monotonic=started,
+                            )
                     return FetchedFinancialWorkItem(
                         row=_build_fetched_row(
                             target=target,
@@ -633,11 +716,7 @@ def _fetch_company_work_item(
                             filing_format="pdf",
                             raw_path=None,
                             parse_status="document_download_error",
-                            parse_failure_reason=(
-                                f"http_status_{http_status}"
-                                if http_status is not None
-                                else "http_error"
-                            ),
+                            parse_failure_reason=failure_reason,
                         ),
                         http_status=http_status,
                         started_monotonic=started,

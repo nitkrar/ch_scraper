@@ -173,6 +173,8 @@ def with_duckdb_connection(
     delay_seconds: float = DB_LOCK_RETRY_DELAY_SECONDS,
 ) -> T:
     last_exc: Exception | None = None
+    if not read_only:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(attempts):
         con: duckdb.DuckDBPyConnection | None = None
         try:

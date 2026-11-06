@@ -206,6 +206,23 @@ class CompaniesHouseClient:
         payload = self._get(f"/company/{company_number}/officers", **request_kwargs)
         return payload.get("items", [])
 
+    def get_company_profile(
+        self,
+        company_number: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict | None:
+        """Return the company profile, or None if Companies House has no such company."""
+        request_kwargs: dict[str, object] = {}
+        if cancel_event is not None:
+            request_kwargs["cancel_event"] = cancel_event
+        try:
+            return self._get(f"/company/{company_number}", **request_kwargs)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
 
 def _active_director_officers(officers: list[dict]) -> list[dict]:
     active: list[dict] = []
@@ -256,6 +273,7 @@ def compute_director_meta(officers: list[dict]) -> dict[str, object]:
             "name": officer.get("name"),
             "officer_role": officer.get("officer_role"),
             "appointed_on": officer.get("appointed_on"),
+            "date_of_birth": officer.get("date_of_birth"),
         }
         for officer in _active_director_officers(officers)
     ]

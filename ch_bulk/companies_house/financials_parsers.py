@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+from collections import Counter
 from datetime import date
 from typing import Any
 
@@ -25,9 +26,10 @@ EMPLOYEE_COUNT_FACTS = (
 #   - the OCR path reading the staff-costs total out of the "Employees and
 #     directors" note (wages + NI + pension) instead of the headcount below it;
 #   - filings that tag the headcount with sign="-", which the iXBRL spec says
-#     to negate, giving "-9 employees".
-# Neither is recoverable here, so bound the value instead. The PDF regex path
-# already caps its match at six digits; hold every path to the same ceiling.
+#     to negate, giving "-9 employees". The magnitude is the real headcount.
+# The staff-costs case is not recoverable here, so bound the value instead.
+# The PDF regex path already caps its match at six digits; hold every path to
+# the same ceiling.
 MAX_PLAUSIBLE_EMPLOYEE_COUNT = 999_999
 GROSS_PROFIT_FACTS = ("GrossProfitLoss",)
 PROFIT_BEFORE_TAX_FACTS = (
@@ -43,9 +45,24 @@ CURRENT_ASSETS_FACTS = ("CurrentAssets",)
 NET_ASSETS_FACTS = (
     "NetAssetsLiabilities",
     "NetAssetsLiabilitiesIncludingPensionAssetLiability",
-    "TotalAssetsLessCurrentLiabilities",
 )
+# Only locates the balance-sheet date for period detection; never a value.
+BALANCE_SHEET_PERIOD_FACTS = NET_ASSETS_FACTS + ("TotalAssetsLessCurrentLiabilities",)
 NET_CURRENT_ASSETS_FACTS = ("NetCurrentAssetsLiabilities",)
+DEBTORS_FACTS = ("Debtors",)
+CREDITORS_FACTS = ("Creditors",)
+PROVISIONS_FOR_LIABILITIES_FACTS = (
+    "ProvisionsForLiabilitiesBalanceSheetSubtotal",
+    "TaxationIncludingDeferredTaxationBalanceSheetSubtotal",
+    "Provisions",
+)
+DEFERRED_TAX_FACTS = (
+    "DeferredTaxLiabilities",
+    "NetDeferredTaxLiabilityAsset",
+)
+WITHIN_ONE_YEAR_MEMBERS = frozenset({"WithinOneYear", "CurrentFinancialInstruments"})
+AFTER_ONE_YEAR_MEMBERS = frozenset({"AfterOneYear", "Non-currentFinancialInstruments"})
+NO_MEMBERS: frozenset[str] = frozenset()
 PERIOD_FACT_GROUPS = (
     REVENUE_FACTS,
     GROSS_PROFIT_FACTS,
@@ -92,6 +109,11 @@ def _empty_parsed_financials(
         parse_status=parse_status,
         parse_failure_reason=parse_failure_reason,
         profit_loss_exempt=False,
+        debtors=None,
+        creditors_within_one_year=None,
+        creditors_after_one_year=None,
+        provisions_for_liabilities=None,
+        deferred_tax=None,
     )
 
 
@@ -107,6 +129,7 @@ def _missing_financial_reasons(
     total_assets: float | None,
     net_assets: float | None,
     net_current_assets: float | None,
+    balance_sheet_detail: dict[str, float | None] | None = None,
 ) -> str | None:
     missing: list[str] = []
     if revenue is None:
@@ -129,6 +152,10 @@ def _missing_financial_reasons(
         missing.append("net_assets_missing")
     if net_current_assets is None:
         missing.append("net_current_assets_missing")
+    # Only parsers that look for the detail fields report them missing.
+    for name, value in (balance_sheet_detail or {}).items():
+        if value is None:
+            missing.append(f"{name}_missing")
     return ",".join(missing) if missing else None
 
 
@@ -146,6 +173,7 @@ def _classify_financial_facts(
     net_current_assets: float | None,
     partial_status: str,
     error_status: str,
+    balance_sheet_detail: dict[str, float | None] | None = None,
 ) -> tuple[str, str | None]:
     if revenue is not None and employee_count is not None:
         return "ok", None
@@ -163,6 +191,7 @@ def _classify_financial_facts(
             total_assets,
             net_assets,
             net_current_assets,
+            *(balance_sheet_detail or {}).values(),
         )
     ):
         return (
@@ -178,6 +207,7 @@ def _classify_financial_facts(
                 total_assets=total_assets,
                 net_assets=net_assets,
                 net_current_assets=net_current_assets,
+                balance_sheet_detail=balance_sheet_detail,
             ),
         )
 
@@ -209,7 +239,8 @@ def coerce_employee_count(value: object) -> int | None:
         count = int(value)
     except (TypeError, ValueError):
         return None
-    if count < 0 or count > MAX_PLAUSIBLE_EMPLOYEE_COUNT:
+    count = abs(count)
+    if count > MAX_PLAUSIBLE_EMPLOYEE_COUNT:
         return None
     return count
 
@@ -226,6 +257,21 @@ def _row_has_segments(row: dict[str, Any]) -> bool:
         if str(value or "").strip():
             return True
     return False
+
+
+def _row_dimension_members(row: dict[str, Any]) -> set[str]:
+    """Local names of the row's dimension members, namespace prefix dropped.
+
+    Segment values look like ``"explicitMember core:SomeDimension core:Member"``.
+    """
+    members: set[str] = set()
+    for key, value in row.items():
+        if not key.startswith("segment:"):
+            continue
+        parts = str(value or "").split(maxsplit=2)
+        if parts:
+            members.add(parts[-1].rsplit(":", 1)[-1])
+    return members
 
 
 def _pick_ixbrl_row(
@@ -305,7 +351,7 @@ def _pick_ixbrl_period_bounds(
         if start is not None or end is not None:
             return start, end
 
-    net_assets_row = _pick_ixbrl_row(rows, NET_ASSETS_FACTS, instant=True)
+    net_assets_row = _pick_ixbrl_row(rows, BALANCE_SHEET_PERIOD_FACTS, instant=True)
     if net_assets_row is not None:
         balance_sheet_end = _row_period_end(net_assets_row)
         if balance_sheet_end is not None:
@@ -364,6 +410,137 @@ def _pick_ixbrl_period_bounds(
     return start, end
 
 
+def _balance_sheet_date(rows: list[dict[str, Any]]) -> date | None:
+    instants = [
+        parsed
+        for parsed in (_parse_date(row.get("instant")) for row in rows)
+        if parsed is not None
+    ]
+    return max(instants) if instants else None
+
+
+def _pick_balance_sheet_value(
+    rows: list[dict[str, Any]],
+    names: tuple[str, ...],
+    *,
+    balance_sheet_date: date | None,
+    allowed_members: frozenset[str] | None = None,
+    require_member: bool = False,
+) -> float | int | None:
+    """Pick an instant fact dated exactly at the balance-sheet date.
+
+    A comparative (prior-year) fact is never returned. ``allowed_members``
+    of None accepts any dimensions; otherwise every dimension member must be
+    in the set, and ``require_member`` rejects facts with no dimensions.
+    """
+    if balance_sheet_date is None:
+        return None
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        if _parse_date(row.get("instant")) != balance_sheet_date:
+            continue
+        if allowed_members is not None:
+            members = _row_dimension_members(row)
+            if require_member and not members:
+                continue
+            if not members <= allowed_members:
+                continue
+        eligible.append(row)
+    return _pick_ixbrl_value(eligible, names, instant=True)
+
+
+def _headcount_value(row: dict[str, Any] | None) -> float | int | None:
+    """Use the displayed headcount when a negative scale made it fractional.
+
+    ``scale="-2"`` on a displayed ``108`` parses as 1.08.
+    """
+    if row is None or row.get("value") is None:
+        return None
+    value = row["value"]
+    if float(value).is_integer():
+        return value
+    displayed = _parse_numeric_text(str(row.get("displayed_text") or ""))
+    if displayed is None or not displayed.is_integer():
+        return value
+    return -displayed if value < 0 else displayed
+
+
+_TEXT_ROW_TAGS = ("tr", "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6")
+_STYLE_TOP_PATTERN = re.compile(r"(?:^|;)\s*top\s*:\s*([^;]+)")
+_TEXT_AMOUNT = r"\d{1,3}(?:,\d{3})+"
+TEXT_REVENUE_ROW_PATTERN = re.compile(
+    rf"^(?:group\s+)?(?:turnover|revenue)\s+(?:\d{{1,2}}\s+)?£?\s*(?P<current>{_TEXT_AMOUNT})"
+    rf"\s+£?\s*(?P<prior>{_TEXT_AMOUNT})(?![\d,.%])",
+    re.IGNORECASE,
+)
+
+
+def _document_text_rows(soup: Any) -> list[str]:
+    """Visible text split into rows, in document order.
+
+    A row is a table row, or a leaf block element. Absolutely positioned
+    sibling blocks sharing a ``top`` offset (one line of a PDF-style layout)
+    are joined into a single row.
+    """
+    rows: list[str] = []
+    last_key: tuple[int, str] | None = None
+    for element in soup.find_all(_TEXT_ROW_TAGS):
+        if element.name == "tr":
+            if element.find("tr") is not None:
+                continue
+        elif element.find_parent("tr") is not None or element.find(_TEXT_ROW_TAGS):
+            continue
+        text = " ".join(element.get_text(" ").split())
+        top_match = _STYLE_TOP_PATTERN.search(str(element.get("style") or ""))
+        key = (
+            (id(element.parent), top_match.group(1).strip())
+            if top_match is not None
+            else None
+        )
+        if key is not None and key == last_key:
+            rows[-1] = f"{rows[-1]} {text}".strip()
+        else:
+            rows.append(text)
+        last_key = key
+    return [row for row in rows if row]
+
+
+def _monetary_scale_factor(ixbrl: IXBRL) -> float:
+    """Ratio of parsed to displayed value for the document's monetary facts."""
+    scales = Counter(
+        int(item.format.scale)
+        for item in ixbrl.numeric
+        if str(item.unit or "").lower().startswith("iso4217:")
+        and item.format is not None
+    )
+    if not scales:
+        return 1.0
+    return float(10 ** scales.most_common(1)[0][0])
+
+
+def _text_revenue(ixbrl: IXBRL) -> float | None:
+    """Current-year turnover from a printed-but-untagged P&L row.
+
+    The largest match wins: summary tables elsewhere in the document may
+    print the same turnover rounded to thousands.
+    """
+    amounts = [
+        amount
+        for amount in (
+            _parse_numeric_text(match.group("current"))
+            for match in (
+                TEXT_REVENUE_ROW_PATTERN.match(row)
+                for row in _document_text_rows(ixbrl.soup)
+            )
+            if match is not None
+        )
+        if amount is not None
+    ]
+    if not amounts:
+        return None
+    return max(amounts) * _monetary_scale_factor(ixbrl)
+
+
 def _derived_total_assets(
     *,
     fixed_assets: float | None,
@@ -381,6 +558,10 @@ def _parse_ixbrl_bytes(
     try:
         ixbrl = IXBRL(io.BytesIO(content), raise_on_error=False)
         rows = ixbrl.to_table(fields="numeric")
+        # to_table emits one row per numeric item, in order, but drops the
+        # displayed text the headcount rule needs.
+        for row, item in zip(rows, ixbrl.numeric):
+            row["displayed_text"] = item.text
     except Exception as exc:
         return _empty_parsed_financials(
             parse_status="ixbrl_parse_error",
@@ -388,10 +569,11 @@ def _parse_ixbrl_bytes(
         )
 
     revenue = _pick_ixbrl_value(rows, REVENUE_FACTS, instant=False)
-    employee_count_value = _pick_ixbrl_value(
-        rows,
-        EMPLOYEE_COUNT_FACTS,
-        instant=False,
+    if revenue is None:
+        revenue = _text_revenue(ixbrl)
+
+    employee_count_value = _headcount_value(
+        _pick_ixbrl_row(rows, EMPLOYEE_COUNT_FACTS, instant=False)
     )
     gross_profit = _pick_ixbrl_value(rows, GROSS_PROFIT_FACTS, instant=False)
     profit_before_tax = _pick_ixbrl_value(
@@ -404,21 +586,69 @@ def _parse_ixbrl_bytes(
         PROFIT_AFTER_TAX_FACTS,
         instant=False,
     )
-    fixed_assets = _pick_ixbrl_value(rows, FIXED_ASSETS_FACTS, instant=True)
-    current_assets = _pick_ixbrl_value(
+    balance_sheet_date = _balance_sheet_date(rows)
+    fixed_assets = _pick_balance_sheet_value(
+        rows,
+        FIXED_ASSETS_FACTS,
+        balance_sheet_date=balance_sheet_date,
+    )
+    current_assets = _pick_balance_sheet_value(
         rows,
         CURRENT_ASSETS_FACTS,
-        instant=True,
+        balance_sheet_date=balance_sheet_date,
     )
-    net_assets = _pick_ixbrl_value(rows, NET_ASSETS_FACTS, instant=True)
-    net_current_assets = _pick_ixbrl_value(
+    net_assets = _pick_balance_sheet_value(
+        rows,
+        NET_ASSETS_FACTS,
+        balance_sheet_date=balance_sheet_date,
+    )
+    net_current_assets = _pick_balance_sheet_value(
         rows,
         NET_CURRENT_ASSETS_FACTS,
-        instant=True,
+        balance_sheet_date=balance_sheet_date,
+    )
+    debtors = _pick_balance_sheet_value(
+        rows,
+        DEBTORS_FACTS,
+        balance_sheet_date=balance_sheet_date,
+        allowed_members=WITHIN_ONE_YEAR_MEMBERS,
+    )
+    creditors_within_one_year = _pick_balance_sheet_value(
+        rows,
+        CREDITORS_FACTS,
+        balance_sheet_date=balance_sheet_date,
+        allowed_members=WITHIN_ONE_YEAR_MEMBERS,
+        require_member=True,
+    )
+    creditors_after_one_year = _pick_balance_sheet_value(
+        rows,
+        CREDITORS_FACTS,
+        balance_sheet_date=balance_sheet_date,
+        allowed_members=AFTER_ONE_YEAR_MEMBERS,
+        require_member=True,
+    )
+    provisions_for_liabilities = _pick_balance_sheet_value(
+        rows,
+        PROVISIONS_FOR_LIABILITIES_FACTS,
+        balance_sheet_date=balance_sheet_date,
+        allowed_members=NO_MEMBERS,
+    )
+    deferred_tax = _pick_balance_sheet_value(
+        rows,
+        DEFERRED_TAX_FACTS,
+        balance_sheet_date=balance_sheet_date,
+        allowed_members=NO_MEMBERS,
     )
 
     employee_count = coerce_employee_count(employee_count_value)
     filing_period_start, filing_period_end = _pick_ixbrl_period_bounds(rows)
+    debtors_value = _optional_float(debtors)
+    # Liabilities are stored as magnitudes: filers tag them with either sign.
+    creditors_within_one_year_value = _optional_abs(creditors_within_one_year)
+    creditors_after_one_year_value = _optional_abs(creditors_after_one_year)
+    provisions_for_liabilities_value = _optional_abs(provisions_for_liabilities)
+    # Signed: a negative deferred tax balance is an asset.
+    deferred_tax_value = _optional_float(deferred_tax)
     revenue_value = float(revenue) if revenue is not None else None
     gross_profit_value = (
         float(gross_profit) if gross_profit is not None else None
@@ -456,6 +686,13 @@ def _parse_ixbrl_bytes(
         net_current_assets=net_current_assets_value,
         partial_status="partial",
         error_status="ixbrl_parse_error",
+        balance_sheet_detail={
+            "debtors": debtors_value,
+            "creditors_within_one_year": creditors_within_one_year_value,
+            "creditors_after_one_year": creditors_after_one_year_value,
+            "provisions_for_liabilities": provisions_for_liabilities_value,
+            "deferred_tax": deferred_tax_value,
+        },
     )
 
     return ParsedFinancialFacts(
@@ -474,7 +711,20 @@ def _parse_ixbrl_bytes(
         parse_status=status,
         parse_failure_reason=reason,
         profit_loss_exempt=profit_loss_exempt,
+        debtors=debtors_value,
+        creditors_within_one_year=creditors_within_one_year_value,
+        creditors_after_one_year=creditors_after_one_year_value,
+        provisions_for_liabilities=provisions_for_liabilities_value,
+        deferred_tax=deferred_tax_value,
     )
+
+
+def _optional_float(value: float | int | None) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _optional_abs(value: float | int | None) -> float | None:
+    return abs(float(value)) if value is not None else None
 
 
 def _parse_numeric_text(value: str) -> float | None:

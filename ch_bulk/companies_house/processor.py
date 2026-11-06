@@ -31,7 +31,10 @@ from rich.console import Console
 
 from ch_bulk.core.cancellation import OperationCancelled, raise_if_cancelled
 from ch_bulk.core.paths import SQL_DIR as _ROOT_SQL_DIR
-from ch_bulk.db.bootstrap import recover_interrupted_compaction
+from ch_bulk.db.bootstrap import (
+    ensure_companies_record_source,
+    recover_interrupted_compaction,
+)
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -77,6 +80,31 @@ SQL_DIR = _ROOT_SQL_DIR / "ch"
 
 # Match the CH bulk filename pattern, e.g. BasicCompanyData-2026-05-01-part1_7.csv
 _CH_DATE_RE = re.compile(r"BasicCompanyData-(\d{4}-\d{2}-\d{2})-part\d+_\d+\.csv$")
+
+# Bulk CSV source columns read by the SELECT in _ingest_to_staging. Keep in
+# sync with that query; a header-only CSV with these columns yields a
+# zero-row companies_staging with the bulk schema.
+BULK_CSV_COLUMNS: tuple[str, ...] = (
+    "CompanyNumber", "CompanyName", "CompanyStatus", "CompanyCategory",
+    "SICCode.SicText_1", "SICCode.SicText_2", "SICCode.SicText_3", "SICCode.SicText_4",
+    "RegAddress.CareOf", "RegAddress.POBox", "RegAddress.AddressLine1",
+    "RegAddress.AddressLine2", "RegAddress.PostTown", "RegAddress.County",
+    "RegAddress.Country", "RegAddress.PostCode",
+    "IncorporationDate", "DissolutionDate", "CountryOfOrigin",
+    "Accounts.AccountRefDay", "Accounts.AccountRefMonth", "Accounts.NextDueDate",
+    "Accounts.LastMadeUpDate", "Accounts.AccountCategory",
+    "Returns.NextDueDate", "Returns.LastMadeUpDate",
+    "ConfStmtNextDueDate", "ConfStmtLastMadeUpDate",
+    "Mortgages.NumMortCharges", "Mortgages.NumMortOutstanding",
+    "Mortgages.NumMortPartSatisfied", "Mortgages.NumMortSatisfied",
+    "LimitedPartnerships.NumGenPartners", "LimitedPartnerships.NumLimPartners",
+    "URI",
+    *(
+        f"PreviousName_{i}.{field}"
+        for i in range(1, 11)
+        for field in ("CONDATE", "CompanyName")
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -454,6 +482,11 @@ def _enforce_sanity(result: SanityCheckResult, force: bool) -> None:
         raise SanityCheckError(result, msg)
 
 
+def _fmt_pct(pct: float | None) -> str:
+    # NULL when companies holds no bulk rows (e.g. only API-loaded rows).
+    return "n/a" if pct is None else f"{pct:.2f}%"
+
+
 def process_csvs(
     csv_files: list[str | Path],
     db_path: str | Path,
@@ -559,6 +592,7 @@ def process_csvs(
         _do_ingest(con)
 
         raise_if_cancelled(cancel_event, reason="CH bulk processing cancelled")
+        ensure_companies_record_source(con)
         result = _do_sanity(con)
         _enforce_sanity(result, force=force)
 
@@ -567,10 +601,11 @@ def process_csvs(
             _do_bootstrap(con)
         else:
             _notify(
-                f"  Sanity OK: row delta {result.row_pct:.2f}%, "
-                f"inactive churn {result.inactive_pct:.2f}%"
+                f"  Sanity OK: row delta {_fmt_pct(result.row_pct)}, "
+                f"inactive churn {_fmt_pct(result.inactive_pct)}"
             )
             _do_upsert(con)
+        ensure_companies_record_source(con)
 
         raise_if_cancelled(cancel_event, reason="CH bulk processing cancelled")
         _do_indexes(con)

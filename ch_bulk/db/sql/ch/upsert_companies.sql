@@ -21,6 +21,7 @@
 --   1. MATCHED (in both staging and companies):
 --      → take all data columns from staging
 --      → preserve first_scrape_date + last_enriched_at from companies
+--        (API-loaded rows have no first_scrape_date; this scrape becomes it)
 --      → set last_scrape_date = scrape, is_active = TRUE, marked_inactive_scrape_date = NULL
 --   2. NEW (in staging only):
 --      → take all data columns from staging
@@ -49,7 +50,7 @@ SELECT * FROM companies WHERE FALSE;
 INSERT INTO companies_new BY NAME
 SELECT
     s.*,
-    c.first_scrape_date,
+    COALESCE(c.first_scrape_date, DATE '{{scrape_date}}') AS first_scrape_date,
     DATE '{{scrape_date}}'   AS last_scrape_date,
     TRUE                     AS is_active,
     CAST(NULL AS DATE)       AS marked_inactive_scrape_date,

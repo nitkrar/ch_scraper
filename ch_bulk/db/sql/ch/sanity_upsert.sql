@@ -9,44 +9,56 @@
 --   * currently_active / would_be_inactivated / inactive_pct
 --     → abort if inactive_pct > 5% (force=True overrides)
 --
+-- Counts over `companies` include only bulk rows (record_source IS NULL);
+-- rows loaded from the CH API by an upload are not part of the snapshot
+-- being compared. A snapshot lists live companies only, so the row count is
+-- compared with the currently-active rows: companies that dropped out of an
+-- earlier snapshot stay in the table as inactive, and that pool only grows.
+--
 -- Run standalone (requires both tables to exist):
 --   $ duckdb ch_bulk.duckdb
 --   D .read sql/ch/sanity_upsert.sql
 
+WITH bulk AS (
+    SELECT company_number, is_active FROM companies WHERE record_source IS NULL
+),
+active AS (
+    SELECT company_number FROM bulk WHERE is_active = TRUE
+)
 SELECT
     -- Row-count delta
-    (SELECT COUNT(*) FROM companies)                              AS old_total,
+    (SELECT COUNT(*) FROM active)                                 AS old_total,
     (SELECT COUNT(*) FROM companies_staging)                      AS new_total,
-    (SELECT COUNT(*) FROM companies_staging) - (SELECT COUNT(*) FROM companies)
+    (SELECT COUNT(*) FROM companies_staging) - (SELECT COUNT(*) FROM active)
                                                                   AS row_delta,
     CASE
-        WHEN (SELECT COUNT(*) FROM companies) = 0 THEN NULL
+        WHEN (SELECT COUNT(*) FROM active) = 0 THEN NULL
         ELSE ROUND(
             100.0 * abs(
-                (SELECT COUNT(*) FROM companies_staging) - (SELECT COUNT(*) FROM companies)
-            ) / (SELECT COUNT(*) FROM companies),
+                (SELECT COUNT(*) FROM companies_staging) - (SELECT COUNT(*) FROM active)
+            ) / (SELECT COUNT(*) FROM active),
             2
         )
     END                                                           AS row_abs_pct_delta,
 
     -- Inactive churn (only over currently-active rows)
-    (SELECT COUNT(*) FROM companies WHERE is_active = TRUE)       AS currently_active,
-    (SELECT COUNT(*) FROM companies c
+    (SELECT COUNT(*) FROM active)                                 AS currently_active,
+    (SELECT COUNT(*) FROM bulk c
         WHERE c.is_active = TRUE
           AND NOT EXISTS (
               SELECT 1 FROM companies_staging s
               WHERE s.company_number = c.company_number
           ))                                                      AS would_be_inactivated,
     CASE
-        WHEN (SELECT COUNT(*) FROM companies WHERE is_active = TRUE) = 0 THEN NULL
+        WHEN (SELECT COUNT(*) FROM active) = 0 THEN NULL
         ELSE ROUND(
-            100.0 * (SELECT COUNT(*) FROM companies c
+            100.0 * (SELECT COUNT(*) FROM bulk c
                         WHERE c.is_active = TRUE
                           AND NOT EXISTS (
                               SELECT 1 FROM companies_staging s
                               WHERE s.company_number = c.company_number
                           ))
-            / (SELECT COUNT(*) FROM companies WHERE is_active = TRUE),
+            / (SELECT COUNT(*) FROM active),
             2
         )
     END                                                           AS inactive_pct;

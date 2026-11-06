@@ -47,3 +47,21 @@ class PathHelperTests(unittest.TestCase):
             self.assertTrue(
                 all(call.args[1] == expected_dir for call in extract_zip.call_args_list)
             )
+
+    def test_sync_routes_download_and_process_progress_to_callback(self):
+        # The GUI passes a callback; without it the downloader draws rich
+        # progress bars in the terminal that launched the app.
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ch = ChBulk(data_dir=tmpdir)
+            with patch("ch_bulk.companies_house.downloader._download_file"), patch(
+                "ch_bulk.companies_house.downloader._extract_zip",
+                return_value=[Path(tmpdir) / "part.csv"],
+            ), patch.object(ChBulk, "process", return_value=0) as process:
+                ch.sync(month="2026-05", progress_callback=messages.append)
+
+        self.assertIn(
+            "Downloading part 1/7: BasicCompanyData-2026-05-01-part1_7.zip",
+            messages,
+        )
+        self.assertEqual(process.call_args.kwargs["progress_callback"], messages.append)

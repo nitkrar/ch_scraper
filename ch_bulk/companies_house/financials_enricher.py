@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 import time
 from pathlib import Path
 
@@ -161,6 +162,7 @@ def enrich_financials(
     workers: int = DEFAULT_WORKERS,
     parser_workers: int = DEFAULT_PARSER_WORKERS,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, object]:
     original_load_settings = _pipeline.load_settings
     original_client = _pipeline.CompaniesHouseFinancialsClient
@@ -183,6 +185,7 @@ def enrich_financials(
             workers=workers,
             parser_workers=parser_workers,
             batch_size=batch_size,
+            cancel_event=cancel_event,
         )
     finally:
         _pipeline.load_settings = original_load_settings

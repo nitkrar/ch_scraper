@@ -8,6 +8,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import duckdb
 
@@ -62,6 +63,7 @@ from ch_bulk.companies_house.processor import (
     compact_database,
     process_csvs,
 )
+from ch_bulk.companies_house.upload_pipeline import UploadSummary, run_upload
 from ch_bulk.companies_house.query import export_query_csv, get_db_info, query_by_sic
 from ch_bulk.companies_house.query import export_directors_age_csv as _export_directors_age_csv
 from ch_bulk.companies_house.query import export_filtered_csv as _export_filtered_csv
@@ -587,6 +589,26 @@ class ChBulk:
             "hsca_updated": int(hsca_summary["records_updated"]),
         }
 
+    def upload_profile(
+        self,
+        input_path: str | Path,
+        output_path: str | Path,
+        *,
+        refresh: bool = False,
+        cancel_event: threading.Event | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> UploadSummary:
+        """Build the standard profile workbook for a file of company numbers."""
+        return run_upload(
+            self.db_path,
+            self.data_dir,
+            input_path,
+            output_path,
+            refresh=refresh,
+            cancel_event=cancel_event,
+            progress=progress,
+        )
+
     def load_staging(
         self,
         *,
@@ -675,6 +697,7 @@ class ChBulk:
         keep_zips: bool = False,
         force: bool = False,
         cancel_event: threading.Event | None = None,
+        progress_callback: callable | None = None,
     ) -> int:
         """Download and process in one step.
 
@@ -685,13 +708,20 @@ class ChBulk:
             month: Month in ``YYYY-MM`` format, or ``None`` to auto-detect.
             keep_zips: If ``True``, keep ZIP files after extraction.
             force: If ``True``, skip the upsert sanity-check guard.
+            progress_callback: If provided, called with status strings
+                instead of showing rich Progress bars in the terminal.
 
         Returns:
             Total number of rows ingested.
         """
-        csv_files = self.download(month=month, keep_zips=keep_zips)
+        csv_files = self.download(
+            month=month,
+            keep_zips=keep_zips,
+            progress_callback=progress_callback,
+        )
         return self.process(
             csv_files=csv_files,
+            progress_callback=progress_callback,
             force=force,
             cancel_event=cancel_event,
         )

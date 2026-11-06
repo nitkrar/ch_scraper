@@ -36,7 +36,11 @@ from ch_bulk.api import ChBulk
 from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
 from ch_bulk.db.bootstrap import recover_interrupted_compaction
+from ch_bulk.companies_house.company_profile import has_bulk_companies
 from ch_bulk.companies_house.processor import SanityCheckError
+from ch_bulk.companies_house.upload_export import write_template_xlsx
+from ch_bulk.companies_house.upload_list import read_company_numbers
+from ch_bulk.db.staging import with_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
@@ -715,6 +719,7 @@ class CHPane(_PaneBase):
             lambda force, cancel_event=None: self.ch.sync(
                 force=force,
                 cancel_event=cancel_event,
+                progress_callback=self.app._progress_cb,
             ),
             success_msg=lambda n: f"CH sync complete: {n:,} companies",
             label="CH syncing...",
@@ -1529,6 +1534,176 @@ class TargetsPane(_PaneBase):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Upload List pane
+# ─────────────────────────────────────────────────────────────────────
+
+class UploadPane(_PaneBase):
+    title = "Upload List"
+
+    _NO_BULK_PROMPT = (
+        "No Companies House bulk data found.\n\n"
+        "Download it first? This is a large download (several hundred MB) "
+        "and takes a while.\n\n"
+        "Yes: download, then run.\n"
+        "No: look companies up via the API only."
+    )
+
+    def __init__(self, parent: ttk.Frame, app: "ChBulkApp"):
+        super().__init__(parent, app)
+        self._input_path: Path | None = None
+        self._build()
+
+    def _build(self) -> None:
+        ttk.Label(
+            self.frame, text="Upload List",
+            font=("TkDefaultFont", 14, "bold"),
+        ).pack(pady=(8, 4), anchor="w", padx=10)
+        ttk.Label(
+            self.frame,
+            text=(
+                "Pick a CSV or Excel file of Companies House numbers. "
+                "Run builds one standard profile row per company."
+            ),
+            foreground="gray",
+        ).pack(anchor="w", padx=10)
+
+        f = ttk.LabelFrame(self.frame, text="Company list")
+        f.pack(fill="x", padx=10, pady=8)
+
+        self.btn_template = ttk.Button(
+            f, text="Download template…", command=self._on_template,
+        )
+        self.btn_template.grid(row=0, column=0, sticky="w", padx=4, pady=4)
+        self.btn_choose = ttk.Button(f, text="Choose file…", command=self._on_choose)
+        self.btn_choose.grid(row=0, column=1, sticky="w", padx=4, pady=4)
+        self.file_label = ttk.Label(f, text="No file chosen", foreground="gray")
+        self.file_label.grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+
+        self.refresh_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f, text="Refresh from Companies House", variable=self.refresh_var,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+
+        self.btn_run = ttk.Button(f, text="Run", command=self._on_run, state="disabled")
+        self.btn_run.grid(row=3, column=0, sticky="w", padx=4, pady=(6, 4))
+
+    def action_buttons(self) -> list[ttk.Widget]:
+        return [self.btn_template, self.btn_choose, self.btn_run]
+
+    def refresh(self) -> None:
+        # _poll_task re-enables every action button; Run stays gated on a valid file.
+        if self._input_path is None:
+            self.btn_run.configure(state="disabled")
+
+    def _on_template(self) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile="company_list_template.xlsx",
+        )
+        if not path:
+            return
+        try:
+            write_template_xlsx(path)
+        except Exception as exc:
+            logger.exception("Template write failed")
+            self.app._set_status(f"Template error: {exc}", error=True)
+            return
+        self.app._set_status(f"Template saved to {path}")
+
+    def _on_choose(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")],
+        )
+        if not path:
+            return
+        self._input_path = None
+        self.btn_run.configure(state="disabled")
+        try:
+            upload = read_company_numbers(path)
+        except ValueError as exc:
+            self.file_label.configure(text=str(exc), foreground="red")
+            return
+        except Exception as exc:
+            logger.exception("Reading upload file failed")
+            self.file_label.configure(text=f"Could not read file: {exc}", foreground="red")
+            return
+        column = upload.column if upload.column is not None else "(no header)"
+        self.file_label.configure(
+            text=(
+                f"{Path(path).name} — column '{column}': "
+                f"{len(upload.numbers)} companies, {len(upload.invalid)} invalid"
+            ),
+            foreground="",
+        )
+        self._input_path = Path(path)
+        self.btn_run.configure(state="normal")
+
+    def _has_bulk_data(self) -> bool:
+        db_path = self.ch.db_path
+        if not db_path.exists():
+            return False
+        return with_duckdb_connection(db_path, has_bulk_companies, read_only=True)
+
+    def _on_run(self) -> None:
+        if self._input_path is None:
+            return
+        if self.app._task_running:
+            self.app._set_status("A task is already running.", error=True)
+            return
+        input_path = self._input_path
+        output_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=f"{input_path.stem}_profiles.xlsx",
+        )
+        if not output_path:
+            return
+        try:
+            has_bulk = self._has_bulk_data()
+        except Exception as exc:
+            logger.exception("Bulk data check failed")
+            self.app._set_status(f"Could not read database: {exc}", error=True)
+            return
+        download_first = False
+        if not has_bulk:
+            choice = messagebox.askyesnocancel("Companies House data", self._NO_BULK_PROMPT)
+            if choice is None:
+                return
+            download_first = choice
+        refresh = self.refresh_var.get()
+
+        def worker(cancel_event: threading.Event | None = None) -> None:
+            try:
+                if download_first:
+                    self.app._progress_cb("Downloading Companies House bulk data...")
+                    self.ch.sync(
+                        cancel_event=cancel_event,
+                        progress_callback=self.app._progress_cb,
+                    )
+                summary = self.ch.upload_profile(
+                    input_path,
+                    output_path,
+                    refresh=refresh,
+                    cancel_event=cancel_event,
+                    progress=self.app._progress_cb,
+                )
+                self.app._progress_cb(
+                    f"Saved {summary.requested:,} companies to {summary.output_path} "
+                    f"({summary.not_found} not found, {summary.invalid} invalid)"
+                )
+            except OperationCancelled:
+                self.app._set_task_msg("Upload cancelled")
+            except Exception as exc:
+                logger.exception("Upload failed")
+                self.app._set_task_error(f"Upload failed: {exc}")
+            finally:
+                self.app._task_done()
+
+        self.app._run_task(worker, "Upload List running...")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Settings pane
 # ─────────────────────────────────────────────────────────────────────
 
@@ -1731,6 +1906,7 @@ class ChBulkApp:
             "CH Companies": CHPane(self.content, self),
             "CQC": CQCPane(self.content, self),
             "Targets": TargetsPane(self.content, self),
+            "Upload List": UploadPane(self.content, self),
             "Settings": SettingsPane(self.content, self),
         }
         # Abbreviations used when the rail is collapsed
@@ -1738,6 +1914,7 @@ class ChBulkApp:
             "CH Companies": "CH",
             "CQC": "CQ",
             "Targets": "🎯",
+            "Upload List": "⬆",
             "Settings": "⚙",
         }
         self.current_pane_name: str | None = None
@@ -1949,7 +2126,9 @@ class ChBulkApp:
                 self._set_task_msg(str(exc) or "Cancelled")
             except SanityCheckError as exc:
                 logger.warning("Sanity check failed: %s", exc)
-                def on_main():
+                # Bound now: Python unbinds `exc` when this except block ends,
+                # before the Tk main loop runs on_main.
+                def on_main(exc: SanityCheckError = exc):
                     body = _format_sanity_failure(exc)
                     if exc.result.dup_distinct_numbers > 0:
                         messagebox.showerror("Sanity check failed", body + "\n\nAborted.")

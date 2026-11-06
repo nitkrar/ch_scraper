@@ -303,11 +303,13 @@ class DirectorsBackfillTests(unittest.TestCase):
                     "name": "DIR ONE",
                     "officer_role": "director",
                     "appointed_on": "2020-01-01",
+                    "date_of_birth": {"year": 1960},
                 },
                 {
                     "name": "DIR TWO",
                     "officer_role": "director",
                     "appointed_on": "2021-01-01",
+                    "date_of_birth": None,
                 },
             ],
         )
@@ -501,11 +503,13 @@ class DirectorsBackfillTests(unittest.TestCase):
                 [
                     {
                         "appointed_on": "2020-01-01",
+                        "date_of_birth": {"year": 1960},
                         "name": "DIR ONE",
                         "officer_role": "director",
                     },
                     {
                         "appointed_on": "2021-01-01",
+                        "date_of_birth": None,
                         "name": "DIR TWO",
                         "officer_role": "director",
                     },

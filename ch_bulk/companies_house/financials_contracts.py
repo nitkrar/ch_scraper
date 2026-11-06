@@ -35,6 +35,9 @@ ERROR_PARSE_STATUSES = {
 
 IXBRL_RESOURCE = "application/xhtml+xml"
 PDF_RESOURCE = "application/pdf"
+# Some filings (e.g. CIC accounts with their CIC34 report) are served only
+# as a zip package whose accounts/ folder holds the iXBRL document.
+ZIP_RESOURCE = "application/zip"
 IXBRL_EXTENSION = "ixbrl"
 PDF_EXTENSION = "pdf"
 
@@ -71,6 +74,11 @@ class ParsedFinancialFacts:
     parse_status: str
     parse_failure_reason: str | None
     profit_loss_exempt: bool = False
+    debtors: float | None = None
+    creditors_within_one_year: float | None = None
+    creditors_after_one_year: float | None = None
+    provisions_for_liabilities: float | None = None
+    deferred_tax: float | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,11 @@ class StagedFinancialRow:
     parse_failure_reason: str | None
     fetched_at: str
     profit_loss_exempt: bool = False
+    debtors: float | None = None
+    creditors_within_one_year: float | None = None
+    creditors_after_one_year: float | None = None
+    provisions_for_liabilities: float | None = None
+    deferred_tax: float | None = None
 
     def to_json_line(self) -> str:
         return json.dumps(
@@ -116,6 +129,11 @@ class StagedFinancialRow:
                 "total_assets": self.total_assets,
                 "net_assets": self.net_assets,
                 "net_current_assets": self.net_current_assets,
+                "debtors": self.debtors,
+                "creditors_within_one_year": self.creditors_within_one_year,
+                "creditors_after_one_year": self.creditors_after_one_year,
+                "provisions_for_liabilities": self.provisions_for_liabilities,
+                "deferred_tax": self.deferred_tax,
                 "filing_age_months": self.filing_age_months,
                 "parse_status": self.parse_status,
                 "parse_failure_reason": self.parse_failure_reason,
