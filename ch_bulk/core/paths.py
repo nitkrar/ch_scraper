@@ -1,10 +1,35 @@
 """Centralized path constants for ch_bulk."""
 
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SQL_DIR = REPO_ROOT / "ch_bulk" / "db" / "sql"
-DEFAULT_DATA_DIR = REPO_ROOT / "data"
+
+
+def _default_data_dir(
+    *,
+    package_root: Path = REPO_ROOT,
+    home: Path | None = None,
+    frozen: bool | None = None,
+) -> Path:
+    """Return the default data directory.
+
+    In a source checkout or a frozen (PyInstaller) app, data lives
+    next to the package, preserving existing behaviour. For a
+    regular installed package there is no checkout, and writing
+    under the install prefix is wrong, so data goes under the
+    user's home directory.
+    """
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+    if frozen or (package_root / "pyproject.toml").exists():
+        return package_root / "data"
+    home_dir = home if home is not None else Path.home()
+    return home_dir / ".ch_bulk" / "data"
+
+
+DEFAULT_DATA_DIR = _default_data_dir()
 DATA_REFERENCE_DIR = DEFAULT_DATA_DIR / "reference"
 
 

@@ -17,11 +17,12 @@ from ch_bulk.core.cancellation import (
     cancellable_sleep,
     raise_if_cancelled,
 )
+from ch_bulk.core.http_retry import parse_retry_after
 from ch_bulk.core.logging import FsyncLineLogger
 from ch_bulk.db.bootstrap import ensure_pipeline_schema, recover_interrupted_compaction
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, revenue_bands_path
+from ch_bulk.core.paths import DEFAULT_DATA_DIR
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
-from ch_bulk.companies_house.revenue_model import estimate, load_bands
+from ch_bulk.companies_house.revenue_model import estimate, load_revenue_bands
 from ch_bulk.core.settings import load_settings
 from ch_bulk.db.staging import (
     LoadedBatch,
@@ -146,6 +147,7 @@ class CompaniesHouseClient:
         params: dict | None = None,
         cancel_event: threading.Event | None = None,
     ) -> dict:
+        last_exc: Exception | None = None
         for attempt in range(5):
             if cancel_event is None:
                 self._short_throttle.wait()
@@ -153,14 +155,30 @@ class CompaniesHouseClient:
             else:
                 self._short_throttle.wait(cancel_event=cancel_event)
                 self._long_throttle.wait(cancel_event=cancel_event)
-            response = self._client.get(path, params=params)
+            try:
+                response = self._client.get(path, params=params)
+            except httpx.TransportError as exc:
+                last_exc = exc
+                pause = 2**attempt
+                logger.warning(
+                    "Companies House transport error for %s (%s), retrying in %ss",
+                    path,
+                    type(exc).__name__,
+                    pause,
+                )
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"Companies House retry cancelled: {path}",
+                    sleep_fn=time.sleep,
+                )
+                continue
 
             if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
-                try:
-                    pause = int(retry_after) if retry_after else DEFAULT_RETRY_AFTER_SECONDS
-                except ValueError:
-                    pause = DEFAULT_RETRY_AFTER_SECONDS
+                pause = parse_retry_after(
+                    response.headers,
+                    default_seconds=DEFAULT_RETRY_AFTER_SECONDS,
+                )
                 logger.warning(
                     "Companies House 429 for %s, sleeping %ss",
                     path,
@@ -193,7 +211,9 @@ class CompaniesHouseClient:
             response.raise_for_status()
             return response.json()
 
-        raise RuntimeError(f"Companies House API failed after retries: {path}")
+        raise RuntimeError(
+            f"Companies House API failed after retries: {path}"
+        ) from last_exc
 
     def get_officers(
         self,
@@ -201,11 +221,25 @@ class CompaniesHouseClient:
         *,
         cancel_event: threading.Event | None = None,
     ) -> list[dict]:
-        request_kwargs: dict[str, object] = {"params": {"items_per_page": 100}}
-        if cancel_event is not None:
-            request_kwargs["cancel_event"] = cancel_event
-        payload = self._get(f"/company/{company_number}/officers", **request_kwargs)
-        return payload.get("items", [])
+        officers: list[dict] = []
+        start_index = 0
+        for _page in range(100):
+            params = {"items_per_page": 100, "start_index": start_index}
+            request_kwargs: dict[str, object] = {"params": params}
+            if cancel_event is not None:
+                request_kwargs["cancel_event"] = cancel_event
+            payload = self._get(
+                f"/company/{company_number}/officers", **request_kwargs
+            )
+            items = payload.get("items", [])
+            officers.extend(items)
+            total = payload.get("total_results")
+            if total is None:
+                break
+            start_index += len(items)
+            if not items or start_index >= int(total):
+                break
+        return officers
 
     def get_company_profile(
         self,
@@ -1204,8 +1238,7 @@ def enrich_revenue(
 ) -> dict[str, int]:
     data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
     db_path = Path(db_path)
-    bands_path = revenue_bands_path(data_dir)
-    bands = load_bands(bands_path)
+    bands = load_revenue_bands(data_dir)
 
     recover_interrupted_compaction(db_path)
     con = duckdb.connect(str(db_path))

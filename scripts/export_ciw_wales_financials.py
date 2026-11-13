@@ -28,8 +28,8 @@ from export_complex_care_merged import (  # noqa: E402
     usable_employee_count,
 )
 
-from ch_bulk.companies_house.revenue_model import estimate, load_bands  # noqa: E402
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH, revenue_bands_path  # noqa: E402
+from ch_bulk.companies_house.revenue_model import estimate, load_revenue_bands  # noqa: E402
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH  # noqa: E402
 
 SOURCE_XLSX = Path("/Users/nitinkum/Downloads/CIW_Wales_Domiciliary_Screen_Classified.xlsx")
 
@@ -162,7 +162,7 @@ def main() -> None:
     con = duckdb.connect(str(args.db_path), read_only=True)
     facts = load_facts(con, numbers)
     con.close()
-    bands = load_bands(revenue_bands_path(args.data_dir))
+    bands = load_revenue_bands(args.data_dir)
 
     for ws in sheets:
         matched = annotate_sheet(ws, facts, bands)

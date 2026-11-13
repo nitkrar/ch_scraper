@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 
 from ch_bulk.core.cancellation import cancellable_sleep
+from ch_bulk.core.http_retry import parse_retry_after
 from ch_bulk.core.paths import DEFAULT_DATA_DIR
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
 from ch_bulk.core.settings import load_settings
@@ -78,20 +79,37 @@ class CQCAPIClient:
         *,
         cancel_event: threading.Event | None = None,
     ) -> APIResult:
+        last_exc: Exception | None = None
         for attempt in range(5):
             if cancel_event is None:
                 self._throttle.wait()
             else:
                 self._throttle.wait(cancel_event=cancel_event)
-            response = self._client.get(path)
+            try:
+                response = self._client.get(path)
+            except httpx.TransportError as exc:
+                last_exc = exc
+                pause = 2**attempt
+                logger.warning(
+                    "CQC API transport error for %s (%s), retrying in %ss",
+                    path,
+                    type(exc).__name__,
+                    pause,
+                )
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"CQC API retry cancelled: {path}",
+                    sleep_fn=time.sleep,
+                )
+                continue
             payload = self._decode_payload(response)
 
             if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
-                try:
-                    pause = int(retry_after) if retry_after else DEFAULT_RETRY_AFTER_SECONDS
-                except ValueError:
-                    pause = DEFAULT_RETRY_AFTER_SECONDS
+                pause = parse_retry_after(
+                    response.headers,
+                    default_seconds=DEFAULT_RETRY_AFTER_SECONDS,
+                )
                 logger.warning("CQC API 429 for %s, sleeping %ss", path, pause)
                 cancellable_sleep(
                     cancel_event,
@@ -122,7 +140,7 @@ class CQCAPIClient:
 
             response.raise_for_status()
 
-        raise RuntimeError(f"CQC API failed after retries: {path}")
+        raise RuntimeError(f"CQC API failed after retries: {path}") from last_exc
 
     def get_provider(
         self,

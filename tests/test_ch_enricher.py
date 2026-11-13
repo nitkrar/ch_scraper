@@ -10,10 +10,10 @@ from unittest.mock import patch
 
 import duckdb
 
-from ch_bulk.core.paths import DATA_REFERENCE_DIR, revenue_bands_path, run_stage_file
+from ch_bulk.core.paths import revenue_bands_path, run_stage_file
 from ch_bulk.db.bootstrap import ensure_pipeline_schema
 from ch_bulk.companies_house.ch_enricher import compute_age_fields, enrich_directors, enrich_revenue
-from ch_bulk.companies_house.revenue_model import estimate, load_bands
+from ch_bulk.companies_house.revenue_model import default_revenue_bands, estimate
 
 
 def _seed_revenue_test_db(db_path: Path) -> None:
@@ -140,8 +140,7 @@ class AgeFieldTests(unittest.TestCase):
 
 class RevenueModelTests(unittest.TestCase):
     def test_load_bands_and_estimate(self):
-        bands_path = DATA_REFERENCE_DIR / "revenue_bands.csv"
-        bands = load_bands(bands_path)
+        bands = default_revenue_bands()
         self.assertGreaterEqual(len(bands), 5)
         self.assertEqual(estimate(75, bands), 3000000.0)
         self.assertIsNone(estimate(0, bands))

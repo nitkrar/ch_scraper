@@ -42,8 +42,8 @@ from export_homecare_xlsx import (  # noqa: E402
 )
 
 from ch_bulk.companies_house.financials_parsers import coerce_employee_count  # noqa: E402
-from ch_bulk.companies_house.revenue_model import estimate, load_bands  # noqa: E402
-from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH, revenue_bands_path  # noqa: E402
+from ch_bulk.companies_house.revenue_model import estimate, load_revenue_bands  # noqa: E402
+from ch_bulk.core.paths import DEFAULT_DATA_DIR, DEFAULT_DB_PATH  # noqa: E402
 
 SOURCE_XLSX = Path("/Users/nitinkum/Downloads/New Complex care_Claude.xlsx")
 
@@ -465,7 +465,7 @@ def main() -> None:
 
     today = date.today()
     current_year = today.year
-    bands = load_bands(revenue_bands_path(args.data_dir))
+    bands = load_revenue_bands(args.data_dir)
 
     _, screened = read_sheet(args.source, "Screened")
     _, selected = read_sheet(args.source, "Selected 56")
@@ -631,7 +631,7 @@ def main() -> None:
             "Revenue (filed accounts) is only populated where turnover actually appears in a filing.",
             "Most of these companies file micro-entity or total-exemption accounts, where turnover is "
             "legally not disclosed, so this column is sparse by nature - it is not a scraping gap.",
-            "Revenue (estimated from employees) is a modelled figure from data/reference/revenue_bands.csv. "
+            "Revenue (estimated from employees) is a modelled figure from the packaged revenue bands " "or a custom bands file in the data directory. "
             "It is an indicative size band for ranking only, not a reported number.",
             "A few filings tag a monetary figure against the employee-count concept. Those values are "
             "rejected rather than tiered on, and the discarded figure is kept in "

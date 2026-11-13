@@ -29,6 +29,7 @@ from ch_bulk.companies_house.financials_contracts import (
 )
 from ch_bulk.core.cancellation import OperationCancelled, cancellable_sleep
 from ch_bulk.companies_house.financials_parsers import _parse_date
+from ch_bulk.core.http_retry import parse_retry_after
 from ch_bulk.core.paths import raw_filings_dir
 from ch_bulk.core.rate_limit import SlidingWindowThrottle
 from ch_bulk.db.staging import isoformat_utc
@@ -85,29 +86,46 @@ class CompaniesHouseFinancialsClient:
         auth: bool = True,
         cancel_event: threading.Event | None = None,
     ) -> requests.Response:
+        last_exc: Exception | None = None
         for attempt in range(5):
             if cancel_event is None:
                 self._throttle.wait()
             else:
                 self._throttle.wait(cancel_event=cancel_event)
-            response = self._session.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=60,
-                allow_redirects=allow_redirects,
-                auth=(self._api_key, "") if auth else None,
-            )
+            try:
+                response = self._session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=60,
+                    allow_redirects=allow_redirects,
+                    auth=(self._api_key, "") if auth else None,
+                )
+            except (
+                requests.ConnectionError,
+                requests.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+            ) as exc:
+                last_exc = exc
+                pause = 2**attempt
+                logger.warning(
+                    "Companies House transport error for %s (%s), retrying in %ss",
+                    url,
+                    type(exc).__name__,
+                    pause,
+                )
+                cancellable_sleep(
+                    cancel_event,
+                    pause,
+                    reason=f"financials request cancelled: {url}",
+                    sleep_fn=time.sleep,
+                )
+                continue
             if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
-                try:
-                    pause = (
-                        int(retry_after)
-                        if retry_after is not None
-                        else DEFAULT_RETRY_AFTER_SECONDS
-                    )
-                except ValueError:
-                    pause = DEFAULT_RETRY_AFTER_SECONDS
+                pause = parse_retry_after(
+                    response.headers,
+                    default_seconds=DEFAULT_RETRY_AFTER_SECONDS,
+                )
                 logger.warning("Companies House 429 for %s, sleeping %ss", url, pause)
                 cancellable_sleep(
                     cancel_event,
@@ -133,16 +151,23 @@ class CompaniesHouseFinancialsClient:
                 continue
             response.raise_for_status()
             return response
-        raise RuntimeError(f"Companies House request failed after retries: {url}")
+        raise RuntimeError(
+            f"Companies House request failed after retries: {url}"
+        ) from last_exc
 
     def get_filing_history(
         self,
         company_number: str,
         *,
+        start_index: int = 0,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         request_kwargs: dict[str, object] = {
-            "params": {"category": "accounts", "items_per_page": 100}
+            "params": {
+                "category": "accounts",
+                "items_per_page": 100,
+                "start_index": start_index,
+            }
         }
         if cancel_event is not None:
             request_kwargs["cancel_event"] = cancel_event
@@ -176,7 +201,31 @@ class CompaniesHouseFinancialsClient:
                 response = request_factory()
                 response.raise_for_status()
                 return bytes(response.content)
-            except requests.HTTPError:
+            except requests.HTTPError as exc:
+                status = _http_status_from_exception(exc)
+                if status in {429, 502, 503, 504} and attempt < 4:
+                    headers = exc.response.headers if exc.response is not None else None
+                    pause = (
+                        parse_retry_after(
+                            headers,
+                            default_seconds=DEFAULT_RETRY_AFTER_SECONDS,
+                        )
+                        if status == 429
+                        else 2**attempt
+                    )
+                    logger.warning(
+                        "Document body download failed for %s (HTTP %s), retrying in %ss",
+                        url,
+                        status,
+                        pause,
+                    )
+                    cancellable_sleep(
+                        cancel_event,
+                        pause,
+                        reason=f"financials document retry cancelled: {url}",
+                        sleep_fn=time.sleep,
+                    )
+                    continue
                 raise
             except requests.RequestException as exc:
                 pause = 2**attempt
@@ -265,8 +314,11 @@ def _normalize_company_ids(values: list[str] | None) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
     for raw in values:
-        cleaned = raw.strip().zfill(8)
-        if not cleaned or cleaned in seen:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        cleaned = stripped.zfill(8)
+        if cleaned in seen:
             continue
         seen.add(cleaned)
         normalized.append(cleaned)
@@ -572,15 +624,27 @@ def _fetch_company_work_item(
     started = time.monotonic()
     http_status: int | None = None
     try:
-        if cancel_event is None:
-            filing_history = client.get_filing_history(target.company_number)
-        else:
+        filing: FilingCandidate | None = None
+        start_index = 0
+        for _page in range(20):
+            history_kwargs: dict[str, object] = {"start_index": start_index}
+            if cancel_event is not None:
+                history_kwargs["cancel_event"] = cancel_event
             filing_history = client.get_filing_history(
                 target.company_number,
-                cancel_event=cancel_event,
+                **history_kwargs,
             )
-        http_status = 200
-        filing = _select_latest_annual_accounts(filing_history)
+            http_status = 200
+            filing = _select_latest_annual_accounts(filing_history)
+            if filing is not None:
+                break
+            items = filing_history.get("items", [])
+            total = filing_history.get("total_count")
+            if total is None:
+                break
+            start_index += len(items)
+            if not items or start_index >= int(total):
+                break
         if filing is None:
             return FetchedFinancialWorkItem(
                 row=_build_fetched_row(

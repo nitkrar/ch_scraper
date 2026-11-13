@@ -716,7 +716,6 @@ def load_financials_staging(
         candidate_status = with_duckdb_connection(
             db_path,
             lambda con, batch=candidate_batch_id: read_status(con, batch),
-            read_only=True,
         )
         recovered_stale_batch = batch_id is None and candidate_status == "running"
         results.append(

@@ -30,6 +30,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -79,12 +80,18 @@ def load_settings(data_dir: str | Path) -> dict[str, Any]:
 
 
 def save_settings(data_dir: str | Path, settings: dict[str, Any]) -> Path:
-    """Write settings.json atomically. Returns the file path."""
+    """Write settings.json atomically. Returns the file path.
+
+    The file holds API keys, so it is restricted to owner-only
+    permissions on POSIX systems before it replaces any existing file.
+    """
     path = settings_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, sort_keys=True)
+    if os.name == "posix":
+        os.chmod(tmp, 0o600)
     tmp.replace(path)
     logger.info("Settings saved to %s", path)
     return path

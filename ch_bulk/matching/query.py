@@ -17,7 +17,8 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.db.bootstrap import recover_interrupted_compaction
+from ch_bulk.core.validation import validate_pagination
+from ch_bulk.db.staging import with_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
@@ -110,34 +111,33 @@ def query_tiered_targets(
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    offset = validate_pagination(page, page_size)
     where_sql, params = _build_targets_where(
         search=search, tiers=tiers, any_director_over_60=any_director_over_60,
         min_revenue=min_revenue, min_employees=min_employees,
     )
     sort_col = TARGETS_SORT_COLUMNS.get(sort_by, "t.total_score")
     sort_order = sort_order.upper() if sort_order.upper() in ("ASC", "DESC") else "DESC"
-    offset = (page - 1) * page_size
 
     data_sql = (
         f"{_SELECT}{where_sql} "
         f"ORDER BY {sort_col} {sort_order} "
-        f"LIMIT {int(page_size)} OFFSET {int(offset)}"
+        f"LIMIT {page_size} OFFSET {offset}"
     )
     count_sql = f"SELECT COUNT(*){_FROM_JOIN}{where_sql}"
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
-        total = con.execute(count_sql, params).fetchone()[0]
-        result = con.execute(data_sql, params)
+    def _run(con: duckdb.DuckDBPyConnection) -> tuple[list[dict], int]:
+        try:
+            total = con.execute(count_sql, params).fetchone()[0]
+            result = con.execute(data_sql, params)
+        except duckdb.CatalogException:
+            # Screening view / cqc_providers not present yet (e.g. CH-only DB).
+            return [], 0
         cols = [d[0] for d in result.description]
         rows = [dict(zip(cols, row)) for row in result.fetchall()]
         return rows, int(total)
-    except duckdb.CatalogException:
-        # Screening view / cqc_providers not present yet (e.g. CH-only DB).
-        return [], 0
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def export_tiered_targets_csv(
@@ -146,6 +146,8 @@ def export_tiered_targets_csv(
     **filters,
 ) -> int:
     db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     where_sql, params = _build_targets_where(**filters)
@@ -155,13 +157,12 @@ def export_tiered_targets_csv(
         f"TO '{safe_path}' (HEADER, DELIMITER ',')"
     )
     count_sql = f"SELECT COUNT(*){_FROM_JOIN}{where_sql}"
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
-        n = con.execute(count_sql, params).fetchone()[0]
-        con.execute(sql, params)
-        return int(n)
-    except duckdb.CatalogException:
-        return 0
-    finally:
-        con.close()
+    def _run(con: duckdb.DuckDBPyConnection) -> int:
+        try:
+            n = con.execute(count_sql, params).fetchone()[0]
+            con.execute(sql, params)
+            return int(n)
+        except duckdb.CatalogException:
+            return 0
+
+    return with_duckdb_connection(db_path, _run)

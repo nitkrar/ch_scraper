@@ -7,7 +7,8 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.db.bootstrap import recover_interrupted_compaction
+from ch_bulk.core.validation import validate_pagination
+from ch_bulk.db.staging import with_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
@@ -222,25 +223,23 @@ def query_cqc_locations(
     if sort_by not in CQC_LOCATION_SORT_COLUMNS:
         sort_by = "name"
     sort_order = sort_order.upper() if sort_order.upper() in ("ASC", "DESC") else "ASC"
-    offset = (page - 1) * page_size
+    offset = validate_pagination(page, page_size)
 
     data_sql = (
         f"SELECT * FROM cqc_locations{where_sql} "
         f"ORDER BY {sort_by} {sort_order} "
-        f"LIMIT {int(page_size)} OFFSET {int(offset)}"
+        f"LIMIT {page_size} OFFSET {offset}"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_locations{where_sql}"
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> tuple[list[dict], int]:
         total = con.execute(count_sql, params).fetchone()[0]
         result = con.execute(data_sql, params)
         cols = [d[0] for d in result.description]
         rows = [dict(zip(cols, row)) for row in result.fetchall()]
         return rows, int(total)
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def query_cqc_providers(
@@ -274,25 +273,23 @@ def query_cqc_providers(
     if sort_by not in CQC_PROVIDER_SORT_COLUMNS:
         sort_by = "provider_name"
     sort_order = sort_order.upper() if sort_order.upper() in ("ASC", "DESC") else "ASC"
-    offset = (page - 1) * page_size
+    offset = validate_pagination(page, page_size)
 
     data_sql = (
         f"SELECT * FROM cqc_providers{where_sql} "
         f"ORDER BY {sort_by} {sort_order} "
-        f"LIMIT {int(page_size)} OFFSET {int(offset)}"
+        f"LIMIT {page_size} OFFSET {offset}"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_providers{where_sql}"
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> tuple[list[dict], int]:
         total = con.execute(count_sql, params).fetchone()[0]
         result = con.execute(data_sql, params)
         cols = [d[0] for d in result.description]
         rows = [dict(zip(cols, row)) for row in result.fetchall()]
         return rows, int(total)
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def _hsca_from_where(
@@ -364,24 +361,22 @@ def query_hsca_locations(
     )
     sort_col = HSCA_LOCATION_SORT_COLUMNS.get(sort_by, "l.name")
     sort_order = sort_order.upper() if sort_order.upper() in ("ASC", "DESC") else "ASC"
-    offset = (page - 1) * page_size
+    offset = validate_pagination(page, page_size)
     data_sql = (
         f"{HSCA_LOCATION_SELECT_SQL}{from_join_sql}{where_sql} "
         f"ORDER BY {sort_col} {sort_order} "
-        f"LIMIT {int(page_size)} OFFSET {int(offset)}"
+        f"LIMIT {page_size} OFFSET {offset}"
     )
     count_sql = f"SELECT COUNT(*){from_join_sql}{where_sql}"
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> tuple[list[dict], int]:
         total = con.execute(count_sql, params).fetchone()[0]
         result = con.execute(data_sql, params)
         cols = [d[0] for d in result.description]
         rows = [dict(zip(cols, row)) for row in result.fetchall()]
         return rows, int(total)
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def export_hsca_locations_csv(
@@ -390,6 +385,8 @@ def export_hsca_locations_csv(
     **filters,
 ) -> int:
     db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     from_join_sql, where_sql, params = _hsca_from_where(**filters)
@@ -398,14 +395,12 @@ def export_hsca_locations_csv(
         f"COPY ({HSCA_LOCATION_SELECT_SQL}{from_join_sql}{where_sql}) "
         f"TO '{str(output_path).replace(chr(39), chr(39)*2)}' (HEADER, DELIMITER ',')"
     )
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> int:
         n = con.execute(count_sql, params).fetchone()[0]
         con.execute(sql, params)
         return int(n)
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def get_cqc_filter_options(db_path: str | Path) -> dict:
@@ -414,38 +409,38 @@ def get_cqc_filter_options(db_path: str | Path) -> dict:
     db_path = Path(db_path)
     if not db_path.exists():
         return {"service_types": [], "regions": [], "local_authorities": []}
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
-        service_types = [
-            r[0] for r in con.execute("""
-                SELECT DISTINCT trim(unnest(string_split(service_types, '|'))) AS s
-                FROM cqc_locations
-                WHERE service_types IS NOT NULL
-                ORDER BY s
-            """).fetchall() if r[0]
-        ]
-        regions = [
-            r[0] for r in con.execute(
-                "SELECT DISTINCT region FROM cqc_locations "
-                "WHERE region IS NOT NULL ORDER BY region"
-            ).fetchall() if r[0]
-        ]
-        local_authorities = [
-            r[0] for r in con.execute(
-                "SELECT DISTINCT local_authority FROM cqc_locations "
-                "WHERE local_authority IS NOT NULL ORDER BY local_authority"
-            ).fetchall() if r[0]
-        ]
-        return {
-            "service_types": service_types,
-            "regions": regions,
-            "local_authorities": local_authorities,
-        }
-    except duckdb.CatalogException:
-        return {"service_types": [], "regions": [], "local_authorities": []}
-    finally:
-        con.close()
+
+    def _run(con: duckdb.DuckDBPyConnection) -> dict:
+        try:
+            service_types = [
+                r[0] for r in con.execute("""
+                    SELECT DISTINCT trim(unnest(string_split(service_types, '|'))) AS s
+                    FROM cqc_locations
+                    WHERE service_types IS NOT NULL
+                    ORDER BY s
+                """).fetchall() if r[0]
+            ]
+            regions = [
+                r[0] for r in con.execute(
+                    "SELECT DISTINCT region FROM cqc_locations "
+                    "WHERE region IS NOT NULL ORDER BY region"
+                ).fetchall() if r[0]
+            ]
+            local_authorities = [
+                r[0] for r in con.execute(
+                    "SELECT DISTINCT local_authority FROM cqc_locations "
+                    "WHERE local_authority IS NOT NULL ORDER BY local_authority"
+                ).fetchall() if r[0]
+            ]
+            return {
+                "service_types": service_types,
+                "regions": regions,
+                "local_authorities": local_authorities,
+            }
+        except duckdb.CatalogException:
+            return {"service_types": [], "regions": [], "local_authorities": []}
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def export_cqc_locations_csv(
@@ -454,6 +449,8 @@ def export_cqc_locations_csv(
     **filters,
 ) -> int:
     db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     where_sql, params = _build_cqc_locations_where(**filters)
@@ -462,14 +459,13 @@ def export_cqc_locations_csv(
         f"TO '{str(output_path).replace(chr(39), chr(39)*2)}' (HEADER, DELIMITER ',')"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_locations{where_sql}"
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+
+    def _run(con: duckdb.DuckDBPyConnection) -> int:
         n = con.execute(count_sql, params).fetchone()[0]
         con.execute(sql, params)
         return int(n)
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def export_cqc_providers_csv(
@@ -478,6 +474,8 @@ def export_cqc_providers_csv(
     **filters,
 ) -> int:
     db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     where_sql, params = _build_cqc_providers_where(**filters)
@@ -486,14 +484,13 @@ def export_cqc_providers_csv(
         f"TO '{str(output_path).replace(chr(39), chr(39)*2)}' (HEADER, DELIMITER ',')"
     )
     count_sql = f"SELECT COUNT(*) FROM cqc_providers{where_sql}"
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+
+    def _run(con: duckdb.DuckDBPyConnection) -> int:
         n = con.execute(count_sql, params).fetchone()[0]
         con.execute(sql, params)
         return int(n)
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 # Backwards-compat alias for older code using a single ‘service_type’ kwarg

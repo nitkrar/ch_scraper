@@ -626,5 +626,18 @@ class RowRebuildingWritersTests(_MergeCase):
         })
 
 
+class LoadAlongsideOpenConnectionTests(_MergeCase):
+    def test_load_works_while_the_app_holds_a_connection(self):
+        # The GUI process keeps short read-write connections open for searches
+        # while a financials job saves. DuckDB refuses a read-only connection
+        # to a file the same process already has open read-write.
+        other = duckdb.connect(str(self.db_path))
+        try:
+            self.load(staged())
+        finally:
+            other.close()
+        self.assertEqual(self.stored("filing_id"), {"filing_id": "new-file"})
+
+
 if __name__ == "__main__":
     unittest.main()

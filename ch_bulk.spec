@@ -11,10 +11,13 @@ duckdb_binaries = collect_dynamic_libs("duckdb")
 tk_datas = collect_data_files("tkinter")
 tk_binaries = collect_dynamic_libs("_tkinter")
 
+# Collect the SQL files the pipelines read from ch_bulk/db/sql/ at runtime
+ch_bulk_datas = collect_data_files("ch_bulk")
+
 a = Analysis(
     ["ch_bulk/gui.py"],
     pathex=["."],
-    datas=duckdb_datas + tk_datas,
+    datas=duckdb_datas + tk_datas + ch_bulk_datas,
     binaries=duckdb_binaries + tk_binaries,
     hiddenimports=[
         "ch_bulk",

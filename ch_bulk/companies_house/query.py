@@ -7,7 +7,8 @@ from pathlib import Path
 
 import duckdb
 
-from ch_bulk.db.bootstrap import recover_interrupted_compaction
+from ch_bulk.core.validation import validate_limit, validate_pagination
+from ch_bulk.db.staging import with_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def _normalise_sic_codes(sic_codes: str | list[str]) -> list[str]:
     """
     if isinstance(sic_codes, str):
         return [s.strip() for s in sic_codes.split(",") if s.strip()]
-    return [str(s).strip() for s in sic_codes]
+    return [str(s).strip() for s in sic_codes if str(s).strip()]
 
 
 def _build_sic_where(
@@ -42,6 +43,9 @@ def _build_sic_where(
     Returns:
         Tuple of (SQL WHERE fragment, list of parameter values).
     """
+    if not sic_codes:
+        raise ValueError("sic_codes must contain at least one code")
+
     def q(column: str) -> str:
         return f"{alias}.{column}" if alias else column
 
@@ -83,6 +87,7 @@ def query_by_sic(
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    limit = validate_limit(limit)
     codes = _normalise_sic_codes(sic_codes)
     where_clause, params = _build_sic_where(codes)
 
@@ -92,17 +97,15 @@ def query_by_sic(
         params.append(status)
     sql += " ORDER BY company_name"
     if limit is not None:
-        sql += f" LIMIT {int(limit)}"
+        sql += f" LIMIT {limit}"
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> list[dict]:
         result = con.execute(sql, params)
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()
         return [dict(zip(columns, row)) for row in rows]
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def export_query_csv(
@@ -134,6 +137,7 @@ def export_query_csv(
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    limit = validate_limit(limit)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -146,14 +150,12 @@ def export_query_csv(
         params.append(status)
     inner_sql += " ORDER BY company_name"
     if limit is not None:
-        inner_sql += f" LIMIT {int(limit)}"
+        inner_sql += f" LIMIT {limit}"
 
     # Escape path for safe SQL embedding (backslashes then single quotes)
     safe_path = str(output_path).replace("\\", "\\\\").replace("'", "''")
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> int:
         # Materialize into temp table (DuckDB doesn't allow params in CREATE VIEW)
         con.execute("DROP TABLE IF EXISTS _export_tmp")
         con.execute(f"CREATE TEMP TABLE _export_tmp AS {inner_sql}", params)
@@ -167,8 +169,8 @@ def export_query_csv(
 
         logger.info("Exported %d records to %s", row_count, output_path)
         return row_count
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def get_db_info(db_path: str | Path) -> dict:
@@ -191,9 +193,7 @@ def get_db_info(db_path: str | Path) -> dict:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> dict:
         # Total companies
         total: int = con.execute(
             "SELECT COUNT(*) FROM companies"
@@ -234,8 +234,7 @@ def get_db_info(db_path: str | Path) -> dict:
             "top_sic_codes": top_sic_codes,
         }
 
-    finally:
-        con.close()
+    return with_duckdb_connection(db_path, _run)
 
 
 # ---------------------------------------------------------------------------
@@ -547,16 +546,14 @@ def _export_copy_sql(
         f"TO '{safe_path}' (HEADER, DELIMITER ',')"
     )
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> int:
         row_count: int = con.execute(
             count_sql, params
         ).fetchone()[0]  # type: ignore[index]
         con.execute(copy_sql, params)
         return row_count
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def _build_filter_where(
@@ -646,6 +643,7 @@ def query_companies(
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    offset = validate_pagination(page, page_size)
     from_sql, where_sql, params = _companies_from_where(
         search=search,
         sic_codes=sic_codes,
@@ -666,7 +664,6 @@ def query_companies(
     else:
         sort_order = sort_order.upper()
 
-    offset = (page - 1) * page_size
     use_joined_search = search is not None and bool(search.strip())
     select_sql = "SELECT c.*" if use_joined_search else "SELECT *"
     sort_col = f"c.{sort_by}" if use_joined_search else sort_by
@@ -674,26 +671,28 @@ def query_companies(
     data_sql = (
         f"{select_sql}{from_sql}{where_sql} "
         f"ORDER BY {sort_col} {sort_order} "
-        f"LIMIT {int(page_size)} OFFSET {int(offset)}"
+        f"LIMIT {page_size} OFFSET {offset}"
     )
     count_sql = f"SELECT COUNT(*){from_sql}{where_sql}"
 
-    con = duckdb.connect(str(db_path))
-    try:
-        # Fetch total count
-        total_count: int = con.execute(
-            count_sql, params
-        ).fetchone()[0]  # type: ignore[index]
+    def _run(con: duckdb.DuckDBPyConnection) -> tuple[list[dict], int]:
+        try:
+            # Fetch total count
+            total_count: int = con.execute(
+                count_sql, params
+            ).fetchone()[0]  # type: ignore[index]
 
-        # Fetch page of results
-        result = con.execute(data_sql, params)
+            # Fetch page of results
+            result = con.execute(data_sql, params)
+        except duckdb.CatalogException:
+            return [], 0
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()
         records = [dict(zip(columns, row)) for row in rows]
 
         return records, total_count
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def query_directors_age(
@@ -719,6 +718,7 @@ def query_directors_age(
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    offset = validate_pagination(page, page_size)
     where_sql, params = _directors_where(
         search=search,
         sic_codes=sic_codes,
@@ -734,18 +734,15 @@ def query_directors_age(
 
     sort_col = DIRECTORS_SORT_COLUMNS.get(sort_by, "c.company_name")
     sort_order = sort_order.upper() if sort_order.upper() in ("ASC", "DESC") else "ASC"
-    offset = (page - 1) * page_size
     from_join_sql = _enrichment_from_join()
     data_sql = (
         f"{DIRECTORS_SELECT_SQL}{from_join_sql}{where_sql} "
         f"ORDER BY {sort_col} {sort_order} "
-        f"LIMIT {int(page_size)} OFFSET {int(offset)}"
+        f"LIMIT {page_size} OFFSET {offset}"
     )
     count_sql = f"SELECT COUNT(*){from_join_sql}{where_sql}"
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> tuple[list[dict], int]:
         try:
             total_count: int = con.execute(
                 count_sql, params
@@ -757,8 +754,8 @@ def query_directors_age(
         rows = result.fetchall()
         records = [dict(zip(columns, row)) for row in rows]
         return records, total_count
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def query_financials(
@@ -785,6 +782,7 @@ def query_financials(
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
+    offset = validate_pagination(page, page_size)
     where_sql, params = _financials_where(
         search=search,
         sic_codes=sic_codes,
@@ -801,18 +799,15 @@ def query_financials(
 
     sort_col = FINANCIALS_SORT_COLUMNS.get(sort_by, "c.company_name")
     sort_order = sort_order.upper() if sort_order.upper() in ("ASC", "DESC") else "ASC"
-    offset = (page - 1) * page_size
     from_join_sql = _enrichment_from_join()
     data_sql = (
         f"{FINANCIALS_SELECT_SQL}{from_join_sql}{where_sql} "
         f"ORDER BY {sort_col} {sort_order} "
-        f"LIMIT {int(page_size)} OFFSET {int(offset)}"
+        f"LIMIT {page_size} OFFSET {offset}"
     )
     count_sql = f"SELECT COUNT(*){from_join_sql}{where_sql}"
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> tuple[list[dict], int]:
         try:
             total_count: int = con.execute(
                 count_sql, params
@@ -824,8 +819,8 @@ def query_financials(
         rows = result.fetchall()
         records = [dict(zip(columns, row)) for row in rows]
         return records, total_count
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def get_filter_options(db_path: str | Path) -> dict:
@@ -834,9 +829,7 @@ def get_filter_options(db_path: str | Path) -> dict:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
-    recover_interrupted_compaction(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
+    def _run(con: duckdb.DuckDBPyConnection) -> dict:
         statuses = [
             row[0]
             for row in con.execute(
@@ -863,8 +856,8 @@ def get_filter_options(db_path: str | Path) -> dict:
             "company_types": company_types,
             "countries": countries,
         }
-    finally:
-        con.close()
+
+    return with_duckdb_connection(db_path, _run)
 
 
 def export_filtered_csv(

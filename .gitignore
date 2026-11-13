@@ -19,14 +19,12 @@ data/*
 data/old_staging/*
 !data/old_staging/README.md
 fixture-data/
-# ...but track runtime reference data + the example settings template
-!data/reference/
-!data/reference/**
+# ...but track the example settings template
 !data/settings.example.json
 *.zip
 *.csv
-# ...except the runtime reference CSV (force-include overrides *.csv above)
-!data/reference/*.csv
+# ...except the packaged revenue-band defaults (force-include overrides *.csv above)
+!ch_bulk/data/*.csv
 
 # Database files
 *.duckdb

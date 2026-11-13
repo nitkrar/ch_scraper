@@ -36,7 +36,6 @@ from typing import Any
 from ch_bulk.api import ChBulk
 from ch_bulk.core.cancellation import OperationCancelled
 from ch_bulk.core.paths import DEFAULT_DATA_DIR, default_db_path
-from ch_bulk.db.bootstrap import recover_interrupted_compaction
 from ch_bulk.companies_house.company_profile import has_bulk_companies
 from ch_bulk.companies_house.processor import SanityCheckError
 from ch_bulk.companies_house.upload_export import write_template_xlsx
@@ -1283,23 +1282,26 @@ class CQCPane(_PaneBase):
 
     def refresh(self) -> None:
         import duckdb
-        try:
-            recover_interrupted_compaction(self.ch.db_path)
-            con = duckdb.connect(str(self.ch.db_path))
+
+        def _counts(con):
+            loc = con.execute("SELECT COUNT(*) FROM cqc_locations").fetchone()[0]
+            active = con.execute(
+                "SELECT COUNT(*) FROM cqc_locations WHERE is_active = TRUE"
+            ).fetchone()[0]
+            prov = con.execute("SELECT COUNT(*) FROM cqc_providers").fetchone()[0]
             try:
-                loc = con.execute("SELECT COUNT(*) FROM cqc_locations").fetchone()[0]
-                active = con.execute(
-                    "SELECT COUNT(*) FROM cqc_locations WHERE is_active = TRUE"
+                hsca_count = con.execute(
+                    "SELECT COUNT(*) FROM cqc_hsca_locations"
                 ).fetchone()[0]
-                prov = con.execute("SELECT COUNT(*) FROM cqc_providers").fetchone()[0]
-                try:
-                    hsca_count = con.execute(
-                        "SELECT COUNT(*) FROM cqc_hsca_locations"
-                    ).fetchone()[0]
-                except duckdb.CatalogException:
-                    hsca_count = 0
-            finally:
-                con.close()
+            except duckdb.CatalogException:
+                hsca_count = 0
+            return loc, active, prov, hsca_count
+
+        try:
+            # Short-bounded retry: refresh runs on the main thread.
+            loc, active, prov, hsca_count = with_duckdb_connection(
+                self.ch.db_path, _counts, attempts=4, delay_seconds=0.05
+            )
             self.status_indicator.configure(
                 text=f"● Ready ({loc:,} locations / {prov:,} providers)",
                 foreground="green",
@@ -1663,7 +1665,7 @@ class UploadPane(_PaneBase):
         db_path = self.ch.db_path
         if not db_path.exists():
             return False
-        return with_duckdb_connection(db_path, has_bulk_companies, read_only=True)
+        return with_duckdb_connection(db_path, has_bulk_companies)
 
     def _on_run(self) -> None:
         if self._input_path is None:
@@ -1749,35 +1751,43 @@ class SettingsPane(_PaneBase):
         info = ttk.Label(
             self.frame,
             text=(
-                "Configure API keys and other persistent settings. "
+                "Configure API keys, appearance, and revenue bands. "
                 "Stored unencrypted at <data_dir>/settings.json."
             ),
             foreground="gray", wraplength=720, justify="left",
         )
         info.pack(anchor="w", padx=10, pady=(0, 8))
 
+        self.notebook = ttk.Notebook(self.frame)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=4)
+        general = ttk.Frame(self.notebook)
+        self.notebook.add(general, text="General")
+        bands_tab = ttk.Frame(self.notebook)
+        self.notebook.add(bands_tab, text="Revenue bands")
+        self._bands_tab = bands_tab
+
         # ── API keys section ─────────────────────────────────────────
-        keys_frame = ttk.LabelFrame(self.frame, text="API keys")
+        keys_frame = ttk.LabelFrame(general, text="API keys")
         keys_frame.pack(fill="x", padx=10, pady=4)
 
         ttk.Label(keys_frame, text="Companies House:").grid(
             row=0, column=0, sticky="e", padx=4, pady=4,
         )
         self.ch_key_var = tk.StringVar()
-        self.ch_key_entry = ttk.Entry(keys_frame, textvariable=self.ch_key_var, width=60)
+        self.ch_key_entry = ttk.Entry(keys_frame, textvariable=self.ch_key_var, width=60, show="*")
         self.ch_key_entry.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
 
         ttk.Label(keys_frame, text="CQC:").grid(
             row=1, column=0, sticky="e", padx=4, pady=4,
         )
         self.cqc_key_var = tk.StringVar()
-        self.cqc_key_entry = ttk.Entry(keys_frame, textvariable=self.cqc_key_var, width=60)
+        self.cqc_key_entry = ttk.Entry(keys_frame, textvariable=self.cqc_key_var, width=60, show="*")
         self.cqc_key_entry.grid(row=1, column=1, sticky="ew", padx=4, pady=4)
 
         keys_frame.grid_columnconfigure(1, weight=1)
 
         # ── Appearance section ───────────────────────────────────────
-        appearance_frame = ttk.LabelFrame(self.frame, text="Appearance")
+        appearance_frame = ttk.LabelFrame(general, text="Appearance")
         appearance_frame.pack(fill="x", padx=10, pady=4)
         ttk.Label(appearance_frame, text="Theme:").grid(
             row=0, column=0, sticky="e", padx=4, pady=4,
@@ -1801,7 +1811,7 @@ class SettingsPane(_PaneBase):
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 4))
 
         # ── Buttons + status ────────────────────────────────────────
-        action_row = ttk.Frame(self.frame)
+        action_row = ttk.Frame(general)
         action_row.pack(fill="x", padx=10, pady=8)
         self.btn_save = ttk.Button(action_row, text="Save", command=self._on_save)
         self.btn_save.pack(side="left", padx=2)
@@ -1813,11 +1823,166 @@ class SettingsPane(_PaneBase):
         # Footer: file path
         from ch_bulk.core.settings import settings_path
         self.path_label = ttk.Label(
-            self.frame,
+            general,
             text=f"Settings file: {settings_path(self.ch.data_dir)}",
             foreground="gray", font=("TkDefaultFont", 9),
         )
         self.path_label.pack(anchor="w", padx=10, pady=(20, 4))
+
+        self._build_bands_tab(bands_tab)
+
+    def _build_bands_tab(self, tab: ttk.Frame) -> None:
+        ttk.Label(
+            tab,
+            text=(
+                "Employee-count bands used to estimate revenue where "
+                "filings do not disclose turnover. A custom file under "
+                "<data_dir>/reference/ takes precedence over the packaged "
+                "defaults; saving here creates that file."
+            ),
+            foreground="gray", wraplength=720, justify="left",
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+        self.bands_source_label = ttk.Label(tab, text="", foreground="gray")
+        self.bands_source_label.pack(anchor="w", padx=10, pady=(0, 4))
+
+        header = ttk.Frame(tab)
+        header.pack(fill="x", padx=10)
+        for text in ("Min", "Max *", "Low £", "High £", "Midpoint £"):
+            ttk.Label(header, text=text, width=14).pack(side="left", padx=2)
+        ttk.Label(
+            tab, text="* Blank max means no upper cap.", foreground="gray",
+        ).pack(anchor="w", padx=10)
+
+        self._band_rows_frame = ttk.Frame(tab)
+        self._band_rows_frame.pack(fill="x", padx=10, pady=4)
+        self._band_rows: list[dict] = []
+
+        buttons = ttk.Frame(tab)
+        buttons.pack(fill="x", padx=10, pady=(4, 8))
+        ttk.Button(buttons, text="Add row", command=self._on_add_band_row).pack(
+            side="left", padx=2
+        )
+        ttk.Button(
+            buttons, text="Save revenue bands", command=self._on_save_bands
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            buttons, text="Reload", command=self._on_reload_bands
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            buttons,
+            text="Restore packaged defaults",
+            command=self._on_restore_bands,
+        ).pack(side="left", padx=2)
+        self.bands_status = ttk.Label(buttons, text="", foreground="gray")
+        self.bands_status.pack(side="left", padx=(12, 0))
+
+    def _add_band_row(self, band=None) -> None:
+        from ch_bulk.companies_house.revenue_model import bands_to_csv_text
+
+        row_frame = ttk.Frame(self._band_rows_frame)
+        row_frame.pack(fill="x", pady=1)
+        values = (
+            bands_to_csv_text([band]).splitlines()[1].split(",")
+            if band is not None
+            else ["", "", "", "", ""]
+        )
+        row: dict = {"frame": row_frame, "vars": {}}
+        for index, field in enumerate(
+            ("min_employees", "max_employees", "low_gbp", "high_gbp", "midpoint_gbp")
+        ):
+            var = tk.StringVar(value=values[index])
+            row["vars"][field] = var
+            ttk.Entry(row_frame, textvariable=var, width=14).pack(side="left", padx=2)
+        ttk.Button(
+            row_frame, text="✕", width=3,
+            command=lambda: self._remove_band_row(row),
+        ).pack(side="left", padx=2)
+        self._band_rows.append(row)
+
+    def _remove_band_row(self, row: dict) -> None:
+        row["frame"].destroy()
+        self._band_rows.remove(row)
+
+    def _load_bands_into_editor(self) -> None:
+        from ch_bulk.companies_house.revenue_model import resolve_revenue_bands
+        from ch_bulk.core.paths import revenue_bands_path
+
+        for row in list(self._band_rows):
+            row["frame"].destroy()
+        self._band_rows.clear()
+        try:
+            bands, is_custom = resolve_revenue_bands(self.ch.data_dir)
+        except Exception as exc:
+            logger.exception("Failed to load revenue bands")
+            self.bands_source_label.configure(text=f"Could not load revenue bands: {exc}")
+            return
+        if is_custom:
+            self.bands_source_label.configure(
+                text=f"Source: custom file at {revenue_bands_path(self.ch.data_dir)}"
+            )
+        else:
+            self.bands_source_label.configure(
+                text="Source: packaged defaults (no custom file saved)"
+            )
+        for band in bands:
+            self._add_band_row(band)
+
+    def _band_rows_to_text(self) -> str:
+        lines = ["min_employees,max_employees,low_gbp,high_gbp,midpoint_gbp"]
+        for row in self._band_rows:
+            values = [row["vars"][field].get().strip() for field in (
+                "min_employees", "max_employees", "low_gbp", "high_gbp", "midpoint_gbp",
+            )]
+            if all(not value for value in values):
+                continue
+            lines.append(",".join(values))
+        return "\n".join(lines) + "\n"
+
+    def _on_add_band_row(self) -> None:
+        self._add_band_row()
+
+    def _on_reload_bands(self) -> None:
+        self._load_bands_into_editor()
+        self.bands_status.configure(text="Loaded from disk", foreground="gray")
+
+    def _on_save_bands(self) -> None:
+        from ch_bulk.companies_house.revenue_model import (
+            parse_revenue_bands_text,
+            save_revenue_bands,
+        )
+        from datetime import datetime
+
+        try:
+            bands = parse_revenue_bands_text(self._band_rows_to_text())
+            path = save_revenue_bands(self.ch.data_dir, bands)
+        except Exception as exc:
+            logger.exception("Failed to save revenue bands")
+            self.bands_status.configure(text=f"Not saved: {exc}", foreground="red")
+            return
+        self._load_bands_into_editor()
+        self.bands_status.configure(
+            text=f"Saved at {datetime.now().strftime('%H:%M:%S')} to {path}",
+            foreground="green",
+        )
+
+    def _on_restore_bands(self) -> None:
+        from ch_bulk.companies_house.revenue_model import delete_custom_revenue_bands
+
+        try:
+            removed = delete_custom_revenue_bands(self.ch.data_dir)
+        except Exception as exc:
+            logger.exception("Failed to remove custom revenue bands")
+            self.bands_status.configure(text=f"Not restored: {exc}", foreground="red")
+            return
+        self._load_bands_into_editor()
+        self.bands_status.configure(
+            text=(
+                "Custom file removed; packaged defaults will be used."
+                if removed
+                else "Already using packaged defaults."
+            ),
+            foreground="green",
+        )
 
     def refresh(self) -> None:
         from ch_bulk.core.settings import load_settings
@@ -1826,6 +1991,7 @@ class SettingsPane(_PaneBase):
         self.cqc_key_var.set(self._settings.get("api_keys", {}).get("cqc", ""))
         self.theme_var.set(self._settings.get("theme", "clam"))
         self.save_status.configure(text="Loaded from disk", foreground="gray")
+        self._load_bands_into_editor()
 
     def _on_save(self) -> None:
         from ch_bulk.core.settings import save_settings

@@ -55,3 +55,11 @@ ch-bulk = "ch_bulk.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["ch_bulk*"]
+
+[tool.setuptools.package-data]
+"ch_bulk" = [
+    "data/*.csv",
+    "db/sql/*.sql",
+    "db/sql/ch/*.sql",
+    "db/sql/cqc/*.sql",
+]
