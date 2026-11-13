@@ -302,6 +302,27 @@ class RunUploadTests(_PipelineCase):
                 positions.append(matches[0])
         self.assertEqual(positions, sorted(positions))
 
+    def test_per_company_progress_is_reported_with_counts(self):
+        self.seed()
+
+        def report_each(_db_path, _data_dir, **kwargs):
+            targets = kwargs.get("company_numbers") or kwargs.get("ids")
+            for done in range(1, len(targets) + 1):
+                kwargs["progress"](done, len(targets))
+            return {}
+
+        lines: list[str] = []
+        with patch(ENRICH_DIRECTORS, side_effect=report_each), \
+                patch(BACKFILL_DIRECTORS, return_value={}), \
+                patch(ENRICH_FINANCIALS, side_effect=report_each), \
+                patch(PROFILE_CLIENT, return_value=self.client):
+            run_upload(self.db_path, self.data_dir, self.write_input([BOTH, DIRS_ONLY]),
+                       self.output_path, progress=lines.append)
+
+        self.assertIn("Fetching directors 1/2 (50%)", [l.split(" · ")[0] for l in lines])
+        self.assertIn("Fetching directors 2/2 (100%)", [l.split(" · ")[0] for l in lines])
+        self.assertIn("Fetching accounts 1/1 (100%)", [l.split(" · ")[0] for l in lines])
+
     def test_unreadable_input_raises_value_error_without_output(self):
         path = self.tmp / "input.csv"
         path.write_text("Name,City\nAcme Ltd,London\n")

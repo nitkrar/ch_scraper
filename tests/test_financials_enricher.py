@@ -1593,14 +1593,17 @@ class FinancialStagingTests(unittest.TestCase):
                 0.0,
             ),
         ):
+            progress_calls: list[tuple[int, int]] = []
             summary = enrich_financials(
                 db_path,
                 data_dir=tmpdir.name,
                 mode="incremental",
                 workers=2,
                 batch_size=1,
+                progress=lambda done, total: progress_calls.append((done, total)),
             )
 
+        self.assertEqual(progress_calls, [(1, 2), (2, 2)])
         self.assertEqual(summary["requested"], 2)
         self.assertEqual(summary["records_fetched"], 2)
         self.assertEqual(summary["records_updated"], 2)

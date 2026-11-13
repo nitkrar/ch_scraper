@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -31,6 +32,39 @@ class UploadSummary:
     looked_up: int
     directors_fetched: int
     financials_fetched: int
+
+
+def _time_left_text(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if minutes < 1:
+        return "under a minute left"
+    if minutes < 60:
+        return f"about {minutes} min left"
+    hours, minutes = divmod(minutes, 60)
+    return f"about {hours} h {minutes} min left"
+
+
+def progress_message(stage: str, done: int, total: int, *, elapsed_seconds: float) -> str:
+    """``"<stage> done/total (pct%)"``, plus a time-left estimate once started."""
+    percent = done * 100 // total if total else 100
+    message = f"{stage} {done:,}/{total:,} ({percent}%)"
+    if 0 < done < total:
+        remaining = elapsed_seconds / done * (total - done)
+        message += f" · {_time_left_text(remaining)}"
+    return message
+
+
+def _stage_progress(
+    notify: Callable[[str], None], stage: str
+) -> Callable[[int, int], None]:
+    started = time.monotonic()
+
+    def report(done: int, total: int) -> None:
+        notify(
+            progress_message(stage, done, total, elapsed_seconds=time.monotonic() - started)
+        )
+
+    return report
 
 
 def _enrichment_state(
@@ -143,6 +177,7 @@ def run_upload(
             data_dir,
             company_numbers=directors_targets,
             cancel_event=cancel_event,
+            progress=_stage_progress(notify, "Fetching directors"),
         )
 
     raise_if_cancelled(cancel_event, reason=_CANCEL_REASON)
@@ -158,6 +193,7 @@ def run_upload(
             mode="list",
             ids=financials_targets,
             cancel_event=cancel_event,
+            progress=_stage_progress(notify, "Fetching accounts"),
         )
 
     raise_if_cancelled(cancel_event, reason=_CANCEL_REASON)

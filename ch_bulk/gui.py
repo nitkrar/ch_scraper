@@ -23,6 +23,7 @@ queries.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import tkinter as tk
@@ -294,6 +295,19 @@ def _three_button_dialog(
 
     parent.wait_window(dialog)
     return result["choice"]
+
+
+_PROGRESS_COUNT_RE = re.compile(r"(\d[\d,]*)/(\d[\d,]*)")
+
+
+def _progress_fraction(message: str) -> float | None:
+    """Fraction from the first ``done/total`` count in a status message."""
+    match = _PROGRESS_COUNT_RE.search(message)
+    if match is None:
+        return None
+    done, total = (int(group.replace(",", "")) for group in match.groups())
+    # done > total is not a count, e.g. a date in a file path.
+    return done / total if 0 < total and done <= total else None
 
 
 def _phase_from_status_message(message: str) -> str | None:
@@ -646,7 +660,9 @@ class CHPane(_PaneBase):
     def _run_query(self) -> None:
         if self.app._task_running:
             self.app._set_status("A task is already running.", error=True); return
-        self.app._set_status("Searching...")
+        # Search progress and errors go to the pane's own label: the status
+        # bar belongs to the user's task, and panes re-query after every task.
+        self.count_label.configure(text="Searching...")
         self.btn_search.configure(state="disabled"); self.btn_export.configure(state="disabled")
         def worker(cancel_event: threading.Event | None = None) -> None:
             try:
@@ -659,11 +675,11 @@ class CHPane(_PaneBase):
                     rows, total = self.ch.query_financials_advanced(**filters)
                 self.app.root.after(0, lambda: self._display(rows, total))
             except FileNotFoundError:
-                self.app.root.after(0, lambda: self.app._set_status("No DB. Click Sync first."))
+                self.app.root.after(0, lambda: self.count_label.configure(text="No DB. Click Sync first."))
             except Exception as exc:
                 logger.exception("CH query error")
                 err = f"Query error: {exc}"
-                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
+                self.app.root.after(0, lambda m=err: self.count_label.configure(text=m))
             finally:
                 self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
                 self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
@@ -1130,7 +1146,9 @@ class CQCPane(_PaneBase):
     def _run_query(self) -> None:
         if self.app._task_running:
             self.app._set_status("A task is already running.", error=True); return
-        self.app._set_status("Searching...")
+        # Search progress and errors go to the pane's own label: the status
+        # bar belongs to the user's task, and panes re-query after every task.
+        self.count_label.configure(text="Searching...")
         self.btn_search.configure(state="disabled"); self.btn_export.configure(state="disabled")
         def worker(cancel_event: threading.Event | None = None) -> None:
             try:
@@ -1143,11 +1161,11 @@ class CQCPane(_PaneBase):
                     rows, total = self.ch.query_hsca_locations_advanced(**filters)
                 self.app.root.after(0, lambda: self._display(rows, total))
             except FileNotFoundError:
-                self.app.root.after(0, lambda: self.app._set_status("No DB. Click Sync first."))
+                self.app.root.after(0, lambda: self.count_label.configure(text="No DB. Click Sync first."))
             except Exception as exc:
                 logger.exception("CQC query error")
                 err = f"Query error: {exc}"
-                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
+                self.app.root.after(0, lambda m=err: self.count_label.configure(text=m))
             finally:
                 self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
                 self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
@@ -1470,7 +1488,9 @@ class TargetsPane(_PaneBase):
         if self.app._task_running:
             self.app._set_status("A task is already running.", error=True)
             return
-        self.app._set_status("Searching targets...")
+        # Search progress and errors go to the pane's own label: the status
+        # bar belongs to the user's task, and panes re-query after every task.
+        self.count_label.configure(text="Searching targets...")
         self.btn_search.configure(state="disabled")
         self.btn_export.configure(state="disabled")
 
@@ -1479,11 +1499,11 @@ class TargetsPane(_PaneBase):
                 rows, total = self.ch.query_tiered_targets_advanced(**self._get_filters())
                 self.app.root.after(0, lambda: self._display(rows, total))
             except FileNotFoundError:
-                self.app.root.after(0, lambda: self.app._set_status("No DB. Click Sync first."))
+                self.app.root.after(0, lambda: self.count_label.configure(text="No DB. Click Sync first."))
             except Exception as exc:
                 logger.exception("Targets query error")
                 err = f"Query error: {exc}"
-                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
+                self.app.root.after(0, lambda m=err: self.count_label.configure(text=m))
             finally:
                 self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
                 self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
@@ -1693,7 +1713,9 @@ class UploadPane(_PaneBase):
                     f"({summary.not_found} not found, {summary.invalid} invalid)"
                 )
             except OperationCancelled:
-                self.app._set_task_msg("Upload cancelled")
+                self.app._set_task_msg(
+                    "Upload stopped. Data fetched so far is saved; run it again to continue."
+                )
             except Exception as exc:
                 logger.exception("Upload failed")
                 self.app._set_task_error(f"Upload failed: {exc}")
@@ -1927,8 +1949,12 @@ class ChBulkApp:
             btn.pack(fill="x", pady=2)
             self.nav_buttons[name] = btn
 
-        # Bottom strip: progress + status
-        self.progress = ttk.Progressbar(self.root, mode="indeterminate")
+        # Bottom strip: progress + Stop (shown while a task runs) + status
+        self.progress_row = ttk.Frame(self.root)
+        self.progress = ttk.Progressbar(self.progress_row, mode="indeterminate")
+        self.progress.pack(side="left", fill="x", expand=True)
+        self.btn_stop = ttk.Button(self.progress_row, text="Stop", command=self._on_stop)
+        self.btn_stop.pack(side="right", padx=(8, 0))
         self.task_label = ttk.Label(self.root, text="", foreground="gray")
         self.task_label.pack(fill="x", padx=14, pady=2, side="bottom")
 
@@ -2085,13 +2111,50 @@ class ChBulkApp:
             self._task_error = None
             self._task_message = label
         self._set_status(label)
-        self._disable_action_buttons("disabled")
-        self.progress.pack(fill="x", padx=14, pady=2, side="bottom", before=self.task_label)
-        self.progress.start(15)
+        self._show_task_controls()
         task_id, _ = self._register_task(target, label=label, can_cancel=True)
         with self._lock:
             self._current_task_id = task_id
         self.root.after(500, self._poll_task)
+
+    def _show_task_controls(self) -> None:
+        self._disable_action_buttons("disabled")
+        self.btn_stop.configure(state="normal")
+        self.progress.configure(mode="indeterminate", value=0)
+        self.progress.start(15)
+        self.progress_row.pack(fill="x", padx=14, pady=2, side="bottom", before=self.task_label)
+
+    def _hide_task_controls(self) -> None:
+        self.progress.stop()
+        self.progress_row.pack_forget()
+        self._disable_action_buttons("normal")
+
+    def _show_progress(self, msg: str) -> None:
+        # Counted messages fill the bar; anything else keeps it animated.
+        fraction = _progress_fraction(msg)
+        indeterminate = str(self.progress.cget("mode")) == "indeterminate"
+        if fraction is None:
+            if not indeterminate:
+                self.progress.configure(mode="indeterminate", value=0)
+                self.progress.start(15)
+        else:
+            if indeterminate:
+                self.progress.stop()
+                self.progress.configure(mode="determinate", maximum=100)
+            self.progress.configure(value=fraction * 100)
+
+    def _on_stop(self) -> None:
+        with self._lock:
+            task_id = self._current_task_id
+        if task_id is None:
+            return
+        with self._registry_lock:
+            task = self._active_tasks.get(task_id)
+        if task is None or task.cancel_event is None:
+            return
+        task.cancel_event.set()
+        self.btn_stop.configure(state="disabled")
+        self._set_task_msg("Stopping after the current step...")
 
     def _poll_task(self) -> None:
         with self._lock:
@@ -2100,11 +2163,10 @@ class ChBulkApp:
             running = self._task_running
         self._set_status(msg, error=bool(err))
         if running:
+            self._show_progress(msg)
             self.root.after(500, self._poll_task)
         else:
-            self.progress.stop()
-            self.progress.pack_forget()
-            self._disable_action_buttons("normal")
+            self._hide_task_controls()
             for pane in self.panes.values():
                 pane.refresh()
 
@@ -2141,6 +2203,7 @@ class ChBulkApp:
                             self._task_error = None
                             self._task_message = f"{label} (force)"
                         self._set_status(self._task_message)
+                        self._show_task_controls()
                         def force_worker(
                             force_cancel_event: threading.Event | None = None,
                         ) -> None:

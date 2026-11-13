@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import pdfplumber
 from ixbrlparse import IXBRL
@@ -163,6 +164,7 @@ def enrich_financials(
     parser_workers: int = DEFAULT_PARSER_WORKERS,
     batch_size: int = DEFAULT_BATCH_SIZE,
     cancel_event: threading.Event | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, object]:
     original_load_settings = _pipeline.load_settings
     original_client = _pipeline.CompaniesHouseFinancialsClient
@@ -186,6 +188,7 @@ def enrich_financials(
             parser_workers=parser_workers,
             batch_size=batch_size,
             cancel_event=cancel_event,
+            progress=progress,
         )
     finally:
         _pipeline.load_settings = original_load_settings

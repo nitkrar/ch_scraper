@@ -10,7 +10,7 @@ import threading
 import time
 from multiprocessing.connection import Connection, wait as wait_for_connections
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import duckdb
 
@@ -141,7 +141,9 @@ def enrich_financials(
     parser_workers: int = DEFAULT_PARSER_WORKERS,
     batch_size: int = DEFAULT_BATCH_SIZE,
     cancel_event: threading.Event | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, object]:
+    """``progress(done, total)`` is called as each company's result is staged."""
     validated_mode = _validated_mode(mode)
     validated_workers = _validated_workers(workers)
     validated_parser_workers = _validated_parser_workers(parser_workers)
@@ -658,6 +660,8 @@ def enrich_financials(
                 f"latency={result.latency_seconds:.2f}s "
                 f"progress={_progress_text(processed, total_requested)}"
             )
+            if progress is not None:
+                progress(processed, total_requested)
             if staged_since_sync >= validated_batch_size:
                 checkpoint_write_phase()
 

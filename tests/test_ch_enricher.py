@@ -304,12 +304,16 @@ class RevenueModelTests(unittest.TestCase):
                     RuntimeError("boom"),
                 ]
 
+                progress_calls: list[tuple[int, int]] = []
                 summary = enrich_directors(
                     db_path,
                     tmpdir,
                     batch_size=2,
+                    progress=lambda done, total: progress_calls.append((done, total)),
                 )
 
+            # Every company counts toward progress, including the failed one.
+            self.assertEqual(progress_calls, [(1, 3), (2, 3), (3, 3)])
             self.assertEqual(summary["enriched"], 1)
             self.assertEqual(summary["no_active_directors"], 1)
             self.assertEqual(summary["error_count"], 1)

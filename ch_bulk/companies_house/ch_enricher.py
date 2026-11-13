@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import duckdb
 import httpx
@@ -876,7 +877,9 @@ def enrich_directors(
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     cancel_event: threading.Event | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, int | str]:
+    """``progress(done, total)`` is called after each company, failed ones included."""
     db_path = Path(db_path)
     data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
     batch_id: str | None = None
@@ -1064,6 +1067,8 @@ def enrich_directors(
                         f"progress={_progress_text(processed, len(targets))}"
                     )
                     run_log.write_line(" ".join(status_bits))
+                    if progress is not None:
+                        progress(processed, len(targets))
 
                 if staged_since_sync >= batch_size_value:
                     checkpoint_write_phase()
