@@ -174,15 +174,30 @@ def _manifest_table_files(manifest: dict[str, object]) -> list[str]:
     return deduped
 
 
-def _reset_sequence(
+def _advance_sequence(
     con: duckdb.DuckDBPyConnection,
     *,
     sequence_name: str,
     next_value: int,
 ) -> None:
-    con.execute(
-        f"CREATE OR REPLACE SEQUENCE {sequence_name} START {max(next_value, 1)}"
-    )
+    """Make the sequence's next value at least `next_value`.
+
+    The sequence can't be replaced: a column default uses it, and DuckDB 2
+    refuses to drop it (1.x allowed it). DuckDB has no ALTER SEQUENCE
+    RESTART either, so draw values until the sequence catches up. It never
+    moves backwards, which at worst leaves a gap in the ids.
+    """
+    start_value, increment, last_value = con.execute(
+        "SELECT start_value, increment_by, last_value FROM duckdb_sequences() "
+        "WHERE sequence_name = ?",
+        [sequence_name],
+    ).fetchone()
+    current = last_value if last_value is not None else start_value - increment
+    steps = (next_value - 1 - current) // increment
+    if steps > 0:
+        con.execute(
+            f"SELECT max(nextval('{sequence_name}')) FROM range(?)", [steps]
+        )
 
 
 def _ensure_companies_table_populated(
@@ -391,7 +406,7 @@ def import_from_parquet(
                         f"SELECT COALESCE(MAX({id_column}), 0) + 1 FROM {table_name}"
                     ).fetchone()[0]
                 )
-                _reset_sequence(
+                _advance_sequence(
                     con,
                     sequence_name=sequence_name,
                     next_value=next_value,

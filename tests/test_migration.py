@@ -373,6 +373,37 @@ class MigrationTests(unittest.TestCase):
                 source_con.close()
                 target_con.close()
 
+    def test_new_rows_after_import_get_ids_above_the_imported_ones(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_db = tmp_path / "source.duckdb"
+            target_db = tmp_path / "target.duckdb"
+            bundle_dir = tmp_path / "portable-bundle"
+            self._create_source_db(source_db)
+            self._create_import_target_db(target_db)
+            export_to_parquet(source_db, bundle_dir)
+            import_from_parquet(bundle_dir, target_db)
+
+            con = duckdb.connect(str(target_db))
+            try:
+                imported_max = con.execute(
+                    "SELECT MAX(website_id) FROM company_websites"
+                ).fetchone()[0]
+                new_id = con.execute(
+                    """
+                    INSERT INTO company_websites (
+                        company_number, discovered_via, url, is_primary, discovered_at
+                    )
+                    VALUES ('12345678', 'manual', 'https://example.org', FALSE,
+                            TIMESTAMP '2026-06-01 00:00:00')
+                    RETURNING website_id
+                    """
+                ).fetchone()[0]
+            finally:
+                con.close()
+            self.assertEqual(imported_max, 9)
+            self.assertEqual(new_id, imported_max + 1)
+
     def test_import_skips_unknown_future_tables_in_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
