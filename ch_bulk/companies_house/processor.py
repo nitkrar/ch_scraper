@@ -81,6 +81,10 @@ SQL_DIR = _ROOT_SQL_DIR / "ch"
 # Match the CH bulk filename pattern, e.g. BasicCompanyData-2026-05-01-part1_7.csv
 _CH_DATE_RE = re.compile(r"BasicCompanyData-(\d{4}-\d{2}-\d{2})-part\d+_\d+\.csv$")
 
+# Temp tables DuckDB fills with rows read_csv skips under ignore_errors.
+_REJECTS_TABLE = "ch_csv_reject_errors"
+_REJECTS_SCAN_TABLE = "ch_csv_reject_scans"
+
 # Bulk CSV source columns read by the SELECT in _ingest_to_staging. Keep in
 # sync with that query; a header-only CSV with these columns yields a
 # zero-row companies_staging with the bulk schema.
@@ -210,8 +214,11 @@ def scrape_date_from_files(csv_files: list[Path]) -> date:
 def _ingest_to_staging(
     con: duckdb.DuckDBPyConnection,
     csv_files: list[Path],
-) -> None:
+) -> int:
     """Load CSV files into ``companies_staging`` (creating the table).
+
+    Malformed CSV rows are skipped rather than failing the load; returns
+    the number of rows skipped.
 
     The big SELECT lives here in Python (not in a SQL file) because the
     file list is dynamic. A standalone reference copy of this query
@@ -219,6 +226,9 @@ def _ingest_to_staging(
     debugging — any change here must be mirrored there.
     """
     con.execute("DROP TABLE IF EXISTS companies_staging")
+    # DuckDB appends to the rejects tables on every scan in a connection.
+    con.execute(f"DROP TABLE IF EXISTS temp.{_REJECTS_TABLE}")
+    con.execute(f"DROP TABLE IF EXISTS temp.{_REJECTS_SCAN_TABLE}")
 
     file_list = ", ".join(f"'{_escape_path(f)}'" for f in csv_files)
 
@@ -231,36 +241,20 @@ def _ingest_to_staging(
             "CompanyCategory"                       AS company_type,
 
             -- SIC codes: extract numeric prefix + keep full text
-            CASE
-                WHEN "SICCode.SicText_1" IS NOT NULL
-                     AND regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1) != ''
-                THEN regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1)
-                ELSE NULL
-            END                                     AS sic_code_1,
+            NULLIF(regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1), '')
+                                                    AS sic_code_1,
             "SICCode.SicText_1"                     AS sic_text_1,
 
-            CASE
-                WHEN "SICCode.SicText_2" IS NOT NULL
-                     AND regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1) != ''
-                THEN regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1)
-                ELSE NULL
-            END                                     AS sic_code_2,
+            NULLIF(regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1), '')
+                                                    AS sic_code_2,
             "SICCode.SicText_2"                     AS sic_text_2,
 
-            CASE
-                WHEN "SICCode.SicText_3" IS NOT NULL
-                     AND regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1) != ''
-                THEN regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1)
-                ELSE NULL
-            END                                     AS sic_code_3,
+            NULLIF(regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1), '')
+                                                    AS sic_code_3,
             "SICCode.SicText_3"                     AS sic_text_3,
 
-            CASE
-                WHEN "SICCode.SicText_4" IS NOT NULL
-                     AND regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1) != ''
-                THEN regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1)
-                ELSE NULL
-            END                                     AS sic_code_4,
+            NULLIF(regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1), '')
+                                                    AS sic_code_4,
             "SICCode.SicText_4"                     AS sic_text_4,
 
             -- Address fields (individual + combined)
@@ -365,9 +359,15 @@ def _ingest_to_staging(
             [{file_list}],
             header = true,
             ignore_errors = true,
+            store_rejects = true,
+            rejects_table = '{_REJECTS_TABLE}',
+            rejects_scan = '{_REJECTS_SCAN_TABLE}',
             all_varchar = true
         )
     """)
+    return con.execute(
+        f"SELECT COUNT(DISTINCT (file_id, line)) FROM {_REJECTS_TABLE}"
+    ).fetchone()[0]
 
 
 def _companies_table_exists(con: duckdb.DuckDBPyConnection) -> bool:
@@ -554,7 +554,13 @@ def process_csvs(
 
     @timed_phase("ingest_to_staging")
     def _do_ingest(con):
-        _ingest_to_staging(con, csv_files)
+        rejected = _ingest_to_staging(con, csv_files)
+        if rejected:
+            logger.warning(
+                "Skipped %d malformed CSV rows for scrape_date=%s",
+                rejected, scrape_date.isoformat(),
+            )
+            _notify(f"  Warning: skipped {rejected:,} malformed CSV rows")
 
     @timed_phase("sanity_checks")
     def _do_sanity(con):

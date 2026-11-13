@@ -5,7 +5,8 @@ CI in this repository. The prior review (previous session) is the source of
 the findings below; each item was checked against source code or a runtime
 probe before being listed as verified.
 
-Status values: `Open`, `In progress`, `Fixed`, `Partial`, `Deferred`.
+Status values: `Open`, `In progress`, `Fixed`, `Partial`, `Deferred`,
+`Removed` (dropped by the user; kept so numbers stay stable).
 Update the status and the verification note in place when an item is fixed.
 Do not renumber items; add new findings at the end.
 
@@ -21,17 +22,17 @@ Do not renumber items; add new findings at the end.
 | AUDIT-08 | High | Partial | API keys stored unencrypted and shown in plaintext in the GUI |
 | AUDIT-09 | Low | Open | Website search checks reachability for every result before scoring or denylisting |
 | AUDIT-10 | Low | Open | Classifier fetches seven pages per site and shares one HTTP/LLM client across threads |
-| AUDIT-11 | Medium | Open | Bulk download is sequential with duplicated GUI/CLI loops; size mismatch is a warning only |
+| AUDIT-11 | Medium | Fixed | Bulk download is sequential with duplicated GUI/CLI loops; size mismatch is a warning only |
 | AUDIT-12 | Low | Open | Validation, progress, and API-client helpers are duplicated across five modules |
-| AUDIT-13 | Low | Open | GUI browse panes duplicate query, display, sort, paging, and export logic |
-| AUDIT-14 | Low | Open | `process()` re-reads and re-upserts every month on each run; no processed-month checkpoint |
-| AUDIT-15 | Low | Open | Minor correctness issues: duplicated regex extraction, silent CSV error drops, LLM JSON parsing cost, `or`-defaults |
+| AUDIT-13 | Low | Fixed | GUI browse panes duplicate query, display, sort, paging, and export logic |
+| AUDIT-14 | Low | Removed | `process()` re-reads and re-upserts every month on each run; no processed-month checkpoint |
+| AUDIT-15 | Low | Fixed | Minor correctness issues: duplicated regex extraction, silent CSV error drops, LLM JSON parsing cost, `or`-defaults |
 | AUDIT-16 | Medium | Open | `query_by_sic` loads all rows into memory (`SELECT *` + `fetchall`) |
 | AUDIT-17 | Feature | Open | No stale-enrichment view or selective re-enrichment |
 | AUDIT-18 | Feature | Open | No shared HTTP retry/throttle layer (follows from AUDIT-05) |
 | AUDIT-19 | Feature | Open | Website search has a single DuckDuckGo HTML backend with no retry |
 | AUDIT-20 | Feature | Open | Export scripts in `scripts/` duplicate pipeline logic instead of using the CLI/GUI |
-| AUDIT-21 | Low | Open | No CI test gate; version repeated in three places; spec lists stale modules; README describes only the SIC use case |
+| AUDIT-21 | Low | Fixed | No CI test gate; version repeated in three places; spec lists stale modules; README describes only the SIC use case |
 
 ## Verified bugs
 
@@ -234,6 +235,14 @@ The resume `HEAD` request is not retried, and a final size mismatch
 is logged as a warning only. Fix: share one download loop, retry the
 `HEAD`, parallelise parts, and fail on a size mismatch.
 
+Fixed (2026-11-14): the GUI and CLI share one download loop
+(`_download_with_retries`). A part shorter than its advertised size
+raises `IncompleteDownloadError` instead of logging a warning; each
+part gets 3 attempts with backoff, and every attempt re-checks the size
+with HEAD and resumes the partial file. Parallel downloads were not
+added (not needed). Pinned by `IncompleteDownloadTests` in
+`tests/test_downloader.py`.
+
 ### AUDIT-12 — Validation, progress, and API-client helpers are duplicated
 
 Evidence: `_validated_mode`, `_progress_text`, and `_duration_text`
@@ -250,12 +259,24 @@ reimplement query, display, sort, paging, and export. Fix: extract
 one shared browse-pane base class; the per-pane differences are
 filters, columns, and sort keys.
 
+Fixed (2026-11-14): `_BrowsePane` in `gui.py` holds the shared
+results table, paging, sorting, search, display and export. Each pane
+declares its sub-views (default sort column, query method, export
+method) in `VIEWS` and supplies its filters and columns. Small
+differences removed: the Targets pane shows "Searching..." like the
+others, filters are read on the main thread before the background
+query, and the result table is rebuilt the same way in every pane.
+Pinned by `BrowsePaneTests` and `SearchStatusTests` in
+`tests/test_gui_status_bar.py` (stand-in widgets, no Tk window).
+
 ### AUDIT-14 — `process()` re-reads every month on each run
 
 Evidence: `ChBulk.process()` discovers and upserts every CSV in the
 input directory each time. Fix: record processed scrape dates and
 skip months already ingested, while keeping an explicit
 reprocess/force path.
+
+Removed by the user (2026-11-14): not worth fixing.
 
 ### AUDIT-15 — Minor correctness issues
 
@@ -267,6 +288,23 @@ from every `{` in the LLM output; and `float(... or 0.1)` /
 `int(... or 400)` turn an explicit `temperature=0` or
 `max_tokens=0` into the default. Fix each in place; the CSV change
 needs a rejected-row count or report, not silent acceptance.
+
+Fixed (2026-11-14):
+- SIC codes: each column runs `regexp_extract` once
+  (`NULLIF(..., '')`); same output. The `.sql.example` mirror was
+  updated too.
+- Malformed CSV rows are still skipped, but counted with DuckDB
+  `store_rejects`; `process_csvs` logs a warning and reports
+  "skipped N malformed CSV rows" in progress. Its return value (row
+  count) is unchanged.
+- `_extract_json_object` scans strict JSON with `raw_decode` and only
+  falls back to the old per-`{` literal parse when the text ends in
+  `}`. It now also accepts a verdict followed by trailing text
+  (e.g. a closing code fence), which used to be a parse error.
+- An explicit `max_tokens`/`temperature` of 0 is now sent as 0.
+Not done: `ch_bulk/cqc/processor.py` also drops malformed CSV rows
+silently (not named in this item). Pinned by
+`tests/test_ch_staging_ingest.py` and `tests/test_classifier.py`.
 
 ### AUDIT-16 — `query_by_sic` loads all rows into memory
 
@@ -311,6 +349,16 @@ mainly as a SIC bulk downloader. Fix: add a CI test gate, use one
 version source, correct the spec, and update the README to cover
 the CQC/HSCA/financials/classification pipeline.
 
+Fixed (2026-11-14): `.github/workflows/test.yml` runs the tests on
+push/PR to main (macOS, Python 3.12 and 3.14); `release.yml` runs them
+before building and fails if the tag is not `v<pyproject version>`.
+`pyproject.toml` is the only version source (the spec and
+`build_app.sh` read it). Stale spec modules now point at
+`ch_bulk.companies_house.*`. The README covers the current pipeline.
+Not yet verified: the workflows have not run on GitHub, the tests have
+not run on Python 3.12, and no PyInstaller build was made. The
+`pyproject.toml` description still says "by SIC code".
+
 ## Verification (uncommitted working copy, 2026-11-14)
 
 - New regression tests were run before the fixes and failed as
@@ -325,4 +373,5 @@ the CQC/HSCA/financials/classification pipeline.
   each contain `ch_bulk/data/revenue_bands.csv` and 16 `.sql` files.
 - After the review corrections to AUDIT-06 and AUDIT-07: 404 passed,
   1 skipped, 313 subtests.
+- After AUDIT-11, 13, 15 and 21: 418 passed, 1 skipped, 338 subtests.
 - No commits were made; all changes are in the working copy.

@@ -104,7 +104,26 @@ def _parse_json_object_candidate(raw: str) -> dict[str, Any] | None:
     return None
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
+    # Strict JSON anywhere in the text; skipping past each decoded object
+    # keeps the scan close to linear.
+    pos = text.find("{")
+    while pos != -1:
+        try:
+            payload, end = _JSON_DECODER.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            end = pos + 1
+        else:
+            if isinstance(payload, dict) and "verdict" in payload:
+                return payload
+        pos = text.find("{", end)
+
+    # Python-literal dicts (single-quoted) must run to the end of the text.
+    if not text.rstrip().endswith("}"):
+        return None
     for match in re.finditer(r"\{", text):
         payload = _parse_json_object_candidate(text[match.start() :])
         if payload is not None:
@@ -119,6 +138,8 @@ def _call_llm(
     model: str,
     llm_config: dict[str, Any],
 ) -> tuple[str | None, dict[str, Any] | None]:
+    max_tokens = llm_config.get("max_tokens")
+    temperature = llm_config.get("temperature")
     payload = {
         "model": model,
         "messages": [
@@ -127,8 +148,8 @@ def _call_llm(
                 "content": PROMPT_TEMPLATE.format(content=content),
             }
         ],
-        "max_tokens": int(llm_config.get("max_tokens") or 400),
-        "temperature": float(llm_config.get("temperature") or 0.1),
+        "max_tokens": 400 if max_tokens is None else int(max_tokens),
+        "temperature": 0.1 if temperature is None else float(temperature),
         "response_format": {"type": "json_object"},
     }
     response = llm_client.post(

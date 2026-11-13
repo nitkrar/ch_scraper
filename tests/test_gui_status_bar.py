@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from ch_bulk import gui
 
 PANES = {
     "CH": (gui.CHPane, "Companies"),
     "CQC": (gui.CQCPane, "Locations"),
-    "Targets": (gui.TargetsPane, None),
+    "Targets": (gui.TargetsPane, "Targets"),
 }
 
 
@@ -28,37 +28,40 @@ class _Label:
         self.text = kwargs.get("text", self.text)
 
 
-def _pane(pane_class, sub_view, query):
+def _pane(pane_class, sub_view, ch=None):
+    """A real pane instance with stand-in widgets: no Tk window opens."""
     status_calls: list[str] = []
-    app = SimpleNamespace(
+    pane = pane_class.__new__(pane_class)
+    pane.app = SimpleNamespace(
         _task_running=False,
         _set_status=lambda msg, error=False: status_calls.append(msg),
         root=SimpleNamespace(after=lambda _ms, fn: fn()),
         _register_task=lambda worker, **_kwargs: worker(None),
     )
-    pane = SimpleNamespace(
-        app=app,
-        ch=Mock(**{name: Mock(side_effect=query) for name in (
-            "query_advanced",
-            "query_cqc_locations_advanced",
-            "query_tiered_targets_advanced",
-        )}),
-        sub_view=sub_view,
-        btn_search=Mock(),
-        btn_export=Mock(),
-        count_label=_Label(),
-        _get_filters=lambda: {},
-        _display=lambda rows, total: pane.count_label.configure(text=f"{total} rows"),
-    )
+    pane.ch = ch or Mock()
+    pane.sub_view = sub_view
+    pane.page = 1
+    pane.total_pages = 1
+    pane._reset_sort()
+    pane.btn_search = Mock()
+    pane.btn_export = Mock()
+    pane.count_label = _Label()
+    pane._get_filters = pane._paging_filters
+    pane._display = lambda rows, total: pane.count_label.configure(text=f"{total} rows")
     return pane, status_calls
+
+
+def _ch_returning(query):
+    names = [spec[1] for pane_class, _ in PANES.values() for spec in pane_class.VIEWS.values()]
+    return Mock(**{name: Mock(side_effect=query) for name in names})
 
 
 class SearchStatusTests(unittest.TestCase):
     def _run(self, query):
         results = {}
         for name, (pane_class, sub_view) in PANES.items():
-            pane, status_calls = _pane(pane_class, sub_view, query)
-            pane_class._run_query(pane)
+            pane, status_calls = _pane(pane_class, sub_view, _ch_returning(query))
+            pane._run_query()
             results[name] = (pane.count_label.text, status_calls)
         return results
 
@@ -85,6 +88,63 @@ class SearchStatusTests(unittest.TestCase):
             with self.subTest(pane=name):
                 self.assertEqual(status_calls, [])
                 self.assertIn("bad column", label)
+
+
+class BrowsePaneTests(unittest.TestCase):
+    """Behaviour every search pane shares: one query per sub-view, sorting, export."""
+
+    def _views(self):
+        for pane_class, _ in PANES.values():
+            for view, (sort_column, query_name, export_name) in pane_class.VIEWS.items():
+                yield pane_class, view, sort_column, query_name, export_name
+
+    def test_each_view_runs_its_own_query_with_paging(self):
+        for pane_class, view, sort_column, query_name, _ in self._views():
+            with self.subTest(pane=pane_class.__name__, view=view):
+                ch = Mock()
+                getattr(ch, query_name).return_value = ([], 0)
+                pane, _ = _pane(pane_class, view, ch)
+                pane.page = 3
+                pane._run_query()
+                getattr(ch, query_name).assert_called_once_with(
+                    sort_by=sort_column,
+                    sort_order=pane_class.default_sort_order,
+                    page=3,
+                    page_size=gui.PAGE_SIZE,
+                )
+
+    def test_sorting_toggles_on_the_same_column_and_resets_on_a_new_one(self):
+        pane, _ = _pane(gui.CHPane, "Directors Age", _ch_returning(lambda **_f: ([], 0)))
+        pane.page = 4
+        pane._on_sort("company_name")
+        self.assertEqual((pane.sort_by["Directors Age"], pane.sort_order), ("company_name", "DESC"))
+        self.assertEqual(pane.page, 1)
+        pane._on_sort("company_name")
+        self.assertEqual(pane.sort_order, "ASC")
+        pane._on_sort("max_director_age")
+        self.assertEqual((pane.sort_by["Directors Age"], pane.sort_order), ("max_director_age", "ASC"))
+        # Each sub-view keeps its own sort column.
+        self.assertEqual(pane.sort_by["Companies"], "company_name")
+
+    def test_targets_default_to_highest_score_first(self):
+        pane, _ = _pane(gui.TargetsPane, "Targets")
+        self.assertEqual((pane.sort_by["Targets"], pane.sort_order), ("total_score", "DESC"))
+        pane._on_sort("total_score")
+        self.assertEqual(pane.sort_order, "ASC")
+
+    def test_export_uses_the_views_export_without_paging(self):
+        for pane_class, view, _, _, export_name in self._views():
+            with self.subTest(pane=pane_class.__name__, view=view):
+                ch = Mock()
+                getattr(ch, export_name).return_value = 5
+                pane, status_calls = _pane(pane_class, view, ch)
+                with patch.object(gui.filedialog, "asksaveasfilename", return_value="/tmp/x.csv") as ask:
+                    pane._on_export()
+                getattr(ch, export_name).assert_called_once_with("/tmp/x.csv")
+                self.assertTrue(ask.call_args.kwargs["initialfile"].endswith("_export.csv"))
+                self.assertEqual(
+                    status_calls[-1], f"Exported 5 {pane_class.row_noun} to /tmp/x.csv"
+                )
 
 
 class ProgressFractionTests(unittest.TestCase):

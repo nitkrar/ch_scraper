@@ -345,23 +345,206 @@ class _PaneBase:
         return []
 
 
+class _BrowsePane(_PaneBase):
+    """A search pane: filters, a paged and sortable results table, CSV export.
+
+    Subclasses build the filter widgets (including btn_search, btn_export
+    and self.results_frame) and supply `_get_filters`, `_current_columns`
+    and `VIEWS`. Results go to the pane's own count label, never the
+    status bar: the status bar belongs to the user's task, and every pane
+    re-queries after a task finishes.
+    """
+
+    # sub-view -> (default sort column, ChBulk query method, ChBulk export method)
+    VIEWS: dict[str, tuple[str, str, str]] = {}
+    default_sort_order = "ASC"
+    label = ""  # names the pane's background tasks and log lines
+    row_noun = "rows"
+
+    def __init__(self, parent: ttk.Frame, app: "ChBulkApp", *, sub_view: str):
+        super().__init__(parent, app)
+        self.sub_view = sub_view
+        self.page = 1
+        self.total_pages = 1
+        self._reset_sort()
+
+    # ── subclass hooks ───────────────────────────────────────────────
+
+    def _current_columns(self) -> list[tuple[str, str, int]]:
+        raise NotImplementedError
+
+    def _get_filters(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _export_filename(self) -> str:
+        return f"{self.sub_view.lower().replace(' ', '_')}_export.csv"
+
+    def _count_text(self, total: int) -> str:
+        return f"{total:,} {self.row_noun}"
+
+    # ── shared behaviour ─────────────────────────────────────────────
+
+    def _reset_sort(self) -> None:
+        self.sort_by = {view: spec[0] for view, spec in self.VIEWS.items()}
+        self.sort_order = self.default_sort_order
+
+    def _paging_filters(self) -> dict[str, Any]:
+        return {
+            "sort_by": self.sort_by[self.sub_view],
+            "sort_order": self.sort_order,
+            "page": self.page,
+            "page_size": PAGE_SIZE,
+        }
+
+    def _build_results_panel(self) -> None:
+        """(Re)build the count label, the table for the current columns, and paging."""
+        for widget in self.results_frame.winfo_children():
+            widget.destroy()
+        self._cols_spec = self._current_columns()
+        self.count_label = ttk.Label(self.results_frame, text="")
+        self.count_label.pack(anchor="w")
+
+        tree_frame = ttk.Frame(self.results_frame)
+        tree_frame.pack(fill="both", expand=True)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        cols = [c[0] for c in self._cols_spec]
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
+        for key, heading, width in self._cols_spec:
+            self.tree.heading(key, text=heading, command=lambda k=key: self._on_sort(k))
+            # stretch=False keeps the column at its declared width when
+            # the window narrows — overflow is reached via the hbar
+            # instead of squishing the column.
+            self.tree.column(key, width=width, minwidth=width, stretch=False)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        pag = ttk.Frame(self.results_frame)
+        pag.pack(fill="x", pady=4)
+        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
+        self.btn_prev.pack(side="left")
+        self.page_label = ttk.Label(pag, text="Page 1 of 1")
+        self.page_label.pack(side="left", padx=10)
+        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
+        self.btn_next.pack(side="left")
+
+    def _clear_results(self) -> None:
+        self.page = 1
+        self.tree.delete(*self.tree.get_children())
+        self.count_label.configure(text="")
+        self.page_label.configure(text="Page 1 of 1")
+
+    def _on_search(self) -> None:
+        self.page = 1
+        self._run_query()
+
+    def _on_sort(self, col: str) -> None:
+        if self.sort_by[self.sub_view] == col:
+            self.sort_order = "DESC" if self.sort_order == "ASC" else "ASC"
+        else:
+            self.sort_by[self.sub_view] = col
+            self.sort_order = "ASC"
+        self.page = 1
+        self._run_query()
+
+    def _on_prev(self) -> None:
+        if self.page > 1:
+            self.page -= 1
+            self._run_query()
+
+    def _on_next(self) -> None:
+        if self.page < self.total_pages:
+            self.page += 1
+            self._run_query()
+
+    def _run_query(self) -> None:
+        if self.app._task_running:
+            self.app._set_status("A task is already running.", error=True)
+            return
+        self.count_label.configure(text="Searching...")
+        self.btn_search.configure(state="disabled")
+        self.btn_export.configure(state="disabled")
+        filters = self._get_filters()
+        query = getattr(self.ch, self.VIEWS[self.sub_view][1])
+
+        def worker(cancel_event: threading.Event | None = None) -> None:
+            try:
+                rows, total = query(**filters)
+                self.app.root.after(0, lambda: self._display(rows, total))
+            except FileNotFoundError:
+                self.app.root.after(0, lambda: self.count_label.configure(text="No DB. Click Sync first."))
+            except Exception as exc:
+                logger.exception("%s query error", self.label)
+                err = f"Query error: {exc}"
+                self.app.root.after(0, lambda m=err: self.count_label.configure(text=m))
+            finally:
+                self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
+                self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
+
+        self.app._register_task(worker, label=f"{self.label} search", can_cancel=False)
+
+    def _display(self, rows, total) -> None:
+        self.total_pages = max(1, -(-total // PAGE_SIZE))
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            self.tree.insert(
+                "", "end",
+                values=[_format_cell(row.get(c[0])) for c in self._cols_spec],
+            )
+        self.count_label.configure(text=self._count_text(total))
+        self.page_label.configure(text=f"Page {self.page} of {self.total_pages}")
+        self.btn_prev.configure(state="normal" if self.page > 1 else "disabled")
+        self.btn_next.configure(state="normal" if self.page < self.total_pages else "disabled")
+
+    def _on_export(self) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=self._export_filename(),
+        )
+        if not path:
+            return
+        filters = self._get_filters()
+        for k in ("page", "page_size", "sort_by", "sort_order"):
+            filters.pop(k, None)
+        export = getattr(self.ch, self.VIEWS[self.sub_view][2])
+        self.app._set_status("Exporting...")
+
+        def worker(cancel_event: threading.Event | None = None) -> None:
+            try:
+                n = export(path, **filters)
+                self.app.root.after(
+                    0, lambda: self.app._set_status(f"Exported {n:,} {self.row_noun} to {path}")
+                )
+            except Exception as exc:
+                logger.exception("%s export error", self.label)
+                err = f"Export error: {exc}"
+                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
+
+        self.app._register_task(worker, label=f"{self.label} export", can_cancel=False)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # CH pane
 # ─────────────────────────────────────────────────────────────────────
 
-class CHPane(_PaneBase):
+class CHPane(_BrowsePane):
     title = "CH Companies"
+    label = "CH"
+    VIEWS = {
+        "Companies": ("company_name", "query_advanced", "export_filtered_csv"),
+        "Directors Age": (
+            "company_name", "query_directors_age_advanced", "export_directors_age_csv",
+        ),
+        "Financials": ("company_name", "query_financials_advanced", "export_financials_csv"),
+    }
 
     def __init__(self, parent: ttk.Frame, app: "ChBulkApp"):
-        super().__init__(parent, app)
-        self.sub_view = "Companies"
-        self.page = 1
-        self.total_pages = 1
-        self.sort_by_comp = "company_name"
-        self.sort_by_dir = "company_name"
-        self.sort_by_fin = "company_name"
-        self.sort_order = "ASC"
-        self._cols_spec = CH_COLUMNS
+        super().__init__(parent, app, sub_view="Companies")
         self._build()
         self.refresh()
 
@@ -475,54 +658,12 @@ class CHPane(_PaneBase):
         self._build_results_panel()
         self.subtabs.bind("<<NotebookTabChanged>>", self._on_subtab_change)
 
-    def _build_results_panel(self) -> None:
-        for widget in self.results_frame.winfo_children():
-            widget.destroy()
-        self.count_label = ttk.Label(self.results_frame, text="")
-        self.count_label.pack(anchor="w")
-        self._build_results_tree()
-        pag = ttk.Frame(self.results_frame)
-        pag.pack(fill="x", pady=4)
-        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
-        self.btn_prev.pack(side="left")
-        self.page_label = ttk.Label(pag, text="Page 1 of 1")
-        self.page_label.pack(side="left", padx=10)
-        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
-        self.btn_next.pack(side="left")
-
-    def _build_results_tree(self) -> None:
-        tree_frame = ttk.Frame(self.results_frame)
-        tree_frame.pack(fill="both", expand=True)
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        cols = [c[0] for c in self._cols_spec]
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
-        for key, heading, width in self._cols_spec:
-            self.tree.heading(key, text=heading, command=lambda k=key: self._on_sort(k))
-            # stretch=False keeps the column at its declared width when
-            # the window narrows — overflow is reached via the hbar
-            # instead of squishing the column.
-            self.tree.column(key, width=width, minwidth=width, stretch=False)
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-
     def _current_columns(self) -> list[tuple[str, str, int]]:
         if self.sub_view == "Directors Age":
             return DIRECTORS_COLUMNS
         if self.sub_view == "Financials":
             return FINANCIALS_COLUMNS
         return CH_COLUMNS
-
-    def _current_sort_attr(self) -> str:
-        if self.sub_view == "Directors Age":
-            return "sort_by_dir"
-        if self.sub_view == "Financials":
-            return "sort_by_fin"
-        return "sort_by_comp"
 
     def _configure_subtab_filters(self) -> None:
         if self.sub_view == "Directors Age":
@@ -552,7 +693,6 @@ class CHPane(_PaneBase):
         if not hasattr(self, "subtabs"):
             return
         self.sub_view = self.subtabs.tab(self.subtabs.select(), "text")
-        self._cols_spec = self._current_columns()
         self._configure_subtab_filters()
         self.page = 1
         self._build_results_panel()
@@ -602,10 +742,7 @@ class CHPane(_PaneBase):
                 out["min_employees"] = int(self.min_employees_var.get())
             except (TypeError, ValueError):
                 pass
-        out["sort_by"] = getattr(self, self._current_sort_attr())
-        out["sort_order"] = self.sort_order
-        out["page"] = self.page
-        out["page_size"] = PAGE_SIZE
+        out.update(self._paging_filters())
         return out
 
     def _on_clear(self) -> None:
@@ -623,109 +760,16 @@ class CHPane(_PaneBase):
             v.set("")
         self.status_var.set("Active")
         self.active_var.set("Active only")
-        self.sort_by_comp = "company_name"
-        self.sort_by_dir = "company_name"
-        self.sort_by_fin = "company_name"
-        self.sort_order = "ASC"
-        self.page = 1
-        self.tree.delete(*self.tree.get_children())
-        self.count_label.configure(text="")
-        self.page_label.configure(text="Page 1 of 1")
+        self._reset_sort()
+        self._clear_results()
 
-    def _on_search(self) -> None:
-        self.page = 1
-        self._run_query()
+    def _export_filename(self) -> str:
+        return f"ch_{super()._export_filename()}"
 
-    def _on_sort(self, col: str) -> None:
-        attr = self._current_sort_attr()
-        if getattr(self, attr) == col and self.sort_order == "ASC":
-            self.sort_order = "DESC"
-        else:
-            setattr(self, attr, col)
-            self.sort_order = "ASC"
-        self.page = 1
-        self._run_query()
-
-    def _on_prev(self) -> None:
-        if self.page > 1:
-            self.page -= 1
-            self._run_query()
-
-    def _on_next(self) -> None:
-        if self.page < self.total_pages:
-            self.page += 1
-            self._run_query()
-
-    def _run_query(self) -> None:
-        if self.app._task_running:
-            self.app._set_status("A task is already running.", error=True); return
-        # Search progress and errors go to the pane's own label: the status
-        # bar belongs to the user's task, and panes re-query after every task.
-        self.count_label.configure(text="Searching...")
-        self.btn_search.configure(state="disabled"); self.btn_export.configure(state="disabled")
-        def worker(cancel_event: threading.Event | None = None) -> None:
-            try:
-                filters = self._get_filters()
-                if self.sub_view == "Companies":
-                    rows, total = self.ch.query_advanced(**filters)
-                elif self.sub_view == "Directors Age":
-                    rows, total = self.ch.query_directors_age_advanced(**filters)
-                else:
-                    rows, total = self.ch.query_financials_advanced(**filters)
-                self.app.root.after(0, lambda: self._display(rows, total))
-            except FileNotFoundError:
-                self.app.root.after(0, lambda: self.count_label.configure(text="No DB. Click Sync first."))
-            except Exception as exc:
-                logger.exception("CH query error")
-                err = f"Query error: {exc}"
-                self.app.root.after(0, lambda m=err: self.count_label.configure(text=m))
-            finally:
-                self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
-                self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
-        self.app._register_task(worker, label="CH search", can_cancel=False)
-
-    def _display(self, rows, total):
-        self.total_pages = max(1, -(-total // PAGE_SIZE))
-        self.tree.delete(*self.tree.get_children())
-        for row in rows:
-            self.tree.insert(
-                "",
-                "end",
-                values=[_format_cell(row.get(c[0])) for c in self._cols_spec],
-            )
+    def _count_text(self, total: int) -> str:
         if self.sub_view != "Companies" and total == 0:
-            self.count_label.configure(text="No enrichment data — run enrichment first.")
-        else:
-            self.count_label.configure(text=f"{total:,} rows")
-        self.page_label.configure(text=f"Page {self.page} of {self.total_pages}")
-        self.btn_prev.configure(state="normal" if self.page > 1 else "disabled")
-        self.btn_next.configure(state="normal" if self.page < self.total_pages else "disabled")
-
-    def _on_export(self) -> None:
-        path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile=f"ch_{self.sub_view.lower().replace(' ', '_')}_export.csv",
-        )
-        if not path: return
-        filters = self._get_filters()
-        for k in ("page", "page_size", "sort_by", "sort_order"):
-            filters.pop(k, None)
-        self.app._set_status("Exporting...")
-        def worker(cancel_event: threading.Event | None = None) -> None:
-            try:
-                if self.sub_view == "Companies":
-                    n = self.ch.export_filtered_csv(path, **filters)
-                elif self.sub_view == "Directors Age":
-                    n = self.ch.export_directors_age_csv(path, **filters)
-                else:
-                    n = self.ch.export_financials_csv(path, **filters)
-                self.app.root.after(0, lambda: self.app._set_status(f"Exported {n:,} rows to {path}"))
-            except Exception as exc:
-                logger.exception("CH export error")
-                err = f"Export error: {exc}"
-                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
-        self.app._register_task(worker, label="CH export", can_cancel=False)
+            return "No enrichment data — run enrichment first."
+        return super()._count_text(total)
 
     # ── DB tasks ──────────────────────────────────────────────────────
 
@@ -788,18 +832,19 @@ class CHPane(_PaneBase):
 # CQC pane (with sub-tabs)
 # ─────────────────────────────────────────────────────────────────────
 
-class CQCPane(_PaneBase):
+class CQCPane(_BrowsePane):
     title = "CQC"
+    label = "CQC"
+    VIEWS = {
+        "Locations": ("name", "query_cqc_locations_advanced", "export_cqc_locations_csv"),
+        "Providers": (
+            "provider_name", "query_cqc_providers_advanced", "export_cqc_providers_csv",
+        ),
+        "HSCA": ("name", "query_hsca_locations_advanced", "export_hsca_locations_csv"),
+    }
 
     def __init__(self, parent: ttk.Frame, app: "ChBulkApp"):
-        super().__init__(parent, app)
-        self.sub_view = "Locations"
-        self.page = 1
-        self.total_pages = 1
-        self.sort_by_loc = "name"
-        self.sort_by_prov = "provider_name"
-        self.sort_by_hsca = "name"
-        self.sort_order = "ASC"
+        super().__init__(parent, app, sub_view="Locations")
         self._build()
         self.refresh()
 
@@ -944,52 +989,8 @@ class CQCPane(_PaneBase):
         # Results
         self.results_frame = ttk.Frame(self.frame)
         self.results_frame.pack(fill="both", expand=True, padx=10, pady=4)
-        self.count_label = ttk.Label(self.results_frame, text="")
-        self.count_label.pack(anchor="w")
-        self._build_results_tree()  # creates self.tree using current sub_view columns
-
-        pag = ttk.Frame(self.results_frame)
-        pag.pack(fill="x", pady=4)
-        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
-        self.btn_prev.pack(side="left")
-        self.page_label = ttk.Label(pag, text="Page 1 of 1")
-        self.page_label.pack(side="left", padx=10)
-        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
-        self.btn_next.pack(side="left")
+        self._build_results_panel()
         self.subtabs.bind("<<NotebookTabChanged>>", self._on_subtab_change)
-
-    def _build_results_tree(self) -> None:
-        """Rebuild the treeview with the active sub-view's columns."""
-        for widget in self.results_frame.winfo_children():
-            if isinstance(widget, ttk.Treeview) or (
-                isinstance(widget, ttk.Frame)
-                and any(isinstance(c, ttk.Treeview) for c in widget.winfo_children())
-            ):
-                widget.destroy()
-        if self.sub_view == "Locations":
-            cols_spec = CQC_LOCATION_COLUMNS
-        elif self.sub_view == "Providers":
-            cols_spec = CQC_PROVIDER_COLUMNS
-        else:
-            cols_spec = HSCA_LOCATION_COLUMNS
-        tree_frame = ttk.Frame(self.results_frame)
-        tree_frame.pack(fill="both", expand=True)
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        cols = [c[0] for c in cols_spec]
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
-        for key, heading, width in cols_spec:
-            self.tree.heading(key, text=heading, command=lambda k=key: self._on_sort(k))
-            # See CHPane: stretch=False makes the table scroll horizontally
-            # instead of compressing columns when the window narrows.
-            self.tree.column(key, width=width, minwidth=width, stretch=False)
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        self._cols_spec = cols_spec
 
     def action_buttons(self) -> list[ttk.Widget]:
         return [
@@ -1037,20 +1038,8 @@ class CQCPane(_PaneBase):
             self.min_locs_var.set("")
             self.has_ch_label.grid()
             self.has_ch_combo.grid()
-        # Rebuild the result tree with new columns, replace pagination row
-        for widget in self.results_frame.winfo_children():
-            widget.destroy()
-        self.count_label = ttk.Label(self.results_frame, text="")
-        self.count_label.pack(anchor="w")
-        self._build_results_tree()
-        pag = ttk.Frame(self.results_frame)
-        pag.pack(fill="x", pady=4)
-        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
-        self.btn_prev.pack(side="left")
-        self.page_label = ttk.Label(pag, text="Page 1 of 1")
-        self.page_label.pack(side="left", padx=10)
-        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
-        self.btn_next.pack(side="left")
+        # Rebuild the result table with the new columns
+        self._build_results_panel()
         self.page = 1
         # Refresh results for the new sub-view (skip during initial build
         # — the app's task_label doesn't exist yet)
@@ -1076,7 +1065,6 @@ class CQCPane(_PaneBase):
                 out["name_contains"] = self.loc_name_var.get().strip()
             if self.postcode_var.get().strip():
                 out["postcode_prefix"] = self.postcode_var.get().strip()
-            out["sort_by"] = self.sort_by_loc
         elif self.sub_view == "Providers":
             # Providers-only: min active location count
             try:
@@ -1084,7 +1072,6 @@ class CQCPane(_PaneBase):
                 out["min_active_location_count"] = min_v
             except (TypeError, ValueError):
                 pass
-            out["sort_by"] = self.sort_by_prov
         else:
             if self.loc_name_var.get().strip():
                 out["name_contains"] = self.loc_name_var.get().strip()
@@ -1094,11 +1081,18 @@ class CQCPane(_PaneBase):
                 out["has_ch_number"] = True
             elif self.has_ch_var.get() == "No":
                 out["has_ch_number"] = False
-            out["sort_by"] = self.sort_by_hsca
-        out["sort_order"] = self.sort_order
-        out["page"] = self.page
-        out["page_size"] = PAGE_SIZE
+        out.update(self._paging_filters())
         return out
+
+    def _current_columns(self) -> list[tuple[str, str, int]]:
+        if self.sub_view == "Locations":
+            return CQC_LOCATION_COLUMNS
+        if self.sub_view == "Providers":
+            return CQC_PROVIDER_COLUMNS
+        return HSCA_LOCATION_COLUMNS
+
+    def _export_filename(self) -> str:
+        return f"cqc_{super()._export_filename()}"
 
     def _on_clear(self) -> None:
         self.provider_var.set("")
@@ -1110,104 +1104,7 @@ class CQCPane(_PaneBase):
         self.min_locs_var.set("")
         self.has_ch_var.set("All")
         self.active_var.set("Active only")
-        self.page = 1
-        self.tree.delete(*self.tree.get_children())
-        self.count_label.configure(text="")
-        self.page_label.configure(text="Page 1 of 1")
-
-    def _on_search(self) -> None:
-        self.page = 1
-        self._run_query()
-
-    def _on_sort(self, col: str) -> None:
-        if self.sub_view == "Locations":
-            attr = "sort_by_loc"
-        elif self.sub_view == "Providers":
-            attr = "sort_by_prov"
-        else:
-            attr = "sort_by_hsca"
-        if getattr(self, attr) == col and self.sort_order == "ASC":
-            self.sort_order = "DESC"
-        else:
-            setattr(self, attr, col)
-            self.sort_order = "ASC"
-        self.page = 1
-        self._run_query()
-
-    def _on_prev(self) -> None:
-        if self.page > 1:
-            self.page -= 1; self._run_query()
-
-    def _on_next(self) -> None:
-        if self.page < self.total_pages:
-            self.page += 1; self._run_query()
-
-    def _run_query(self) -> None:
-        if self.app._task_running:
-            self.app._set_status("A task is already running.", error=True); return
-        # Search progress and errors go to the pane's own label: the status
-        # bar belongs to the user's task, and panes re-query after every task.
-        self.count_label.configure(text="Searching...")
-        self.btn_search.configure(state="disabled"); self.btn_export.configure(state="disabled")
-        def worker(cancel_event: threading.Event | None = None) -> None:
-            try:
-                filters = self._get_filters()
-                if self.sub_view == "Locations":
-                    rows, total = self.ch.query_cqc_locations_advanced(**filters)
-                elif self.sub_view == "Providers":
-                    rows, total = self.ch.query_cqc_providers_advanced(**filters)
-                else:
-                    rows, total = self.ch.query_hsca_locations_advanced(**filters)
-                self.app.root.after(0, lambda: self._display(rows, total))
-            except FileNotFoundError:
-                self.app.root.after(0, lambda: self.count_label.configure(text="No DB. Click Sync first."))
-            except Exception as exc:
-                logger.exception("CQC query error")
-                err = f"Query error: {exc}"
-                self.app.root.after(0, lambda m=err: self.count_label.configure(text=m))
-            finally:
-                self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
-                self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
-        self.app._register_task(worker, label="CQC search", can_cancel=False)
-
-    def _display(self, rows, total):
-        self.total_pages = max(1, -(-total // PAGE_SIZE))
-        self.tree.delete(*self.tree.get_children())
-        for row in rows:
-            self.tree.insert(
-                "", "end",
-                values=[_format_cell(row.get(c[0])) for c in self._cols_spec],
-            )
-        self.count_label.configure(text=f"{total:,} rows")
-        self.page_label.configure(text=f"Page {self.page} of {self.total_pages}")
-        self.btn_prev.configure(state="normal" if self.page > 1 else "disabled")
-        self.btn_next.configure(state="normal" if self.page < self.total_pages else "disabled")
-
-    def _on_export(self) -> None:
-        path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile=f"cqc_{self.sub_view.lower()}_export.csv",
-        )
-        if not path: return
-        filters = self._get_filters()
-        for k in ("page", "page_size", "sort_by", "sort_order"):
-            filters.pop(k, None)
-        self.app._set_status("Exporting...")
-        def worker(cancel_event: threading.Event | None = None) -> None:
-            try:
-                if self.sub_view == "Locations":
-                    n = self.ch.export_cqc_locations_csv(path, **filters)
-                elif self.sub_view == "Providers":
-                    n = self.ch.export_cqc_providers_csv(path, **filters)
-                else:
-                    n = self.ch.export_hsca_locations_csv(path, **filters)
-                self.app.root.after(0, lambda: self.app._set_status(f"Exported {n:,} rows to {path}"))
-            except Exception as exc:
-                logger.exception("CQC export error")
-                err = f"Export error: {exc}"
-                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
-        self.app._register_task(worker, label="CQC export", can_cancel=False)
+        self._clear_results()
 
     # ── DB tasks ──────────────────────────────────────────────────────
 
@@ -1326,8 +1223,16 @@ class CQCPane(_PaneBase):
 # Targets pane (tiered_targets screening output)
 # ─────────────────────────────────────────────────────────────────────
 
-class TargetsPane(_PaneBase):
+class TargetsPane(_BrowsePane):
     title = "Targets"
+    label = "Targets"
+    row_noun = "targets"
+    default_sort_order = "DESC"
+    VIEWS = {
+        "Targets": (
+            "total_score", "query_tiered_targets_advanced", "export_tiered_targets_csv",
+        ),
+    }
 
     _TIER_CHOICES = {
         "Tier 1-3": ["Tier 1", "Tier 2", "Tier 3"],
@@ -1338,11 +1243,7 @@ class TargetsPane(_PaneBase):
     }
 
     def __init__(self, parent: ttk.Frame, app: "ChBulkApp"):
-        super().__init__(parent, app)
-        self.page = 1
-        self.total_pages = 1
-        self.sort_by = "total_score"
-        self.sort_order = "DESC"
+        super().__init__(parent, app, sub_view="Targets")
         self._build()
 
     def _build(self) -> None:
@@ -1391,34 +1292,9 @@ class TargetsPane(_PaneBase):
 
         _make_filter_grid_responsive(f)
 
-        rf = ttk.Frame(self.frame)
-        rf.pack(fill="both", expand=True, padx=10, pady=4)
-        self.count_label = ttk.Label(rf, text="")
-        self.count_label.pack(anchor="w")
-        tree_frame = ttk.Frame(rf)
-        tree_frame.pack(fill="both", expand=True)
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        cols = [c[0] for c in TARGETS_COLUMNS]
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
-        for key, heading, width in TARGETS_COLUMNS:
-            self.tree.heading(key, text=heading, command=lambda k=key: self._on_sort(k))
-            self.tree.column(key, width=width, minwidth=width, stretch=False)
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-
-        pag = ttk.Frame(rf)
-        pag.pack(fill="x", pady=4)
-        self.btn_prev = ttk.Button(pag, text="<< Prev", command=self._on_prev)
-        self.btn_prev.pack(side="left")
-        self.page_label = ttk.Label(pag, text="Page 1 of 1")
-        self.page_label.pack(side="left", padx=10)
-        self.btn_next = ttk.Button(pag, text="Next >>", command=self._on_next)
-        self.btn_next.pack(side="left")
+        self.results_frame = ttk.Frame(self.frame)
+        self.results_frame.pack(fill="both", expand=True, padx=10, pady=4)
+        self._build_results_panel()
 
     def action_buttons(self) -> list[ttk.Widget]:
         return [self.btn_search, self.btn_export]
@@ -1444,11 +1320,19 @@ class TargetsPane(_PaneBase):
             out["min_employees"] = int(self.min_employees_var.get())
         except (TypeError, ValueError):
             pass
-        out["sort_by"] = self.sort_by
-        out["sort_order"] = self.sort_order
-        out["page"] = self.page
-        out["page_size"] = PAGE_SIZE
+        out.update(self._paging_filters())
         return out
+
+    def _current_columns(self) -> list[tuple[str, str, int]]:
+        return TARGETS_COLUMNS
+
+    def _export_filename(self) -> str:
+        return "tiered_targets_export.csv"
+
+    def _count_text(self, total: int) -> str:
+        if total == 0:
+            return "No targets — run matching + enrichment first."
+        return super()._count_text(total)
 
     def _on_clear(self) -> None:
         self.tier_var.set("Tier 1-3")
@@ -1456,104 +1340,9 @@ class TargetsPane(_PaneBase):
         self.any60_var.set(False)
         self.min_revenue_var.set("")
         self.min_employees_var.set("")
-        self.sort_by = "total_score"
-        self.sort_order = "DESC"
+        self._reset_sort()
         self.page = 1
         self._run_query()
-
-    def _on_search(self) -> None:
-        self.page = 1
-        self._run_query()
-
-    def _on_sort(self, col: str) -> None:
-        if self.sort_by == col and self.sort_order == "ASC":
-            self.sort_order = "DESC"
-        elif self.sort_by == col:
-            self.sort_order = "ASC"
-        else:
-            self.sort_by = col
-            self.sort_order = "ASC"
-        self.page = 1
-        self._run_query()
-
-    def _on_prev(self) -> None:
-        if self.page > 1:
-            self.page -= 1
-            self._run_query()
-
-    def _on_next(self) -> None:
-        if self.page < self.total_pages:
-            self.page += 1
-            self._run_query()
-
-    def _run_query(self) -> None:
-        if self.app._task_running:
-            self.app._set_status("A task is already running.", error=True)
-            return
-        # Search progress and errors go to the pane's own label: the status
-        # bar belongs to the user's task, and panes re-query after every task.
-        self.count_label.configure(text="Searching targets...")
-        self.btn_search.configure(state="disabled")
-        self.btn_export.configure(state="disabled")
-
-        def worker(cancel_event: threading.Event | None = None) -> None:
-            try:
-                rows, total = self.ch.query_tiered_targets_advanced(**self._get_filters())
-                self.app.root.after(0, lambda: self._display(rows, total))
-            except FileNotFoundError:
-                self.app.root.after(0, lambda: self.count_label.configure(text="No DB. Click Sync first."))
-            except Exception as exc:
-                logger.exception("Targets query error")
-                err = f"Query error: {exc}"
-                self.app.root.after(0, lambda m=err: self.count_label.configure(text=m))
-            finally:
-                self.app.root.after(0, lambda: self.btn_search.configure(state="normal"))
-                self.app.root.after(0, lambda: self.btn_export.configure(state="normal"))
-
-        self.app._register_task(worker, label="Targets search", can_cancel=False)
-
-    def _display(self, rows, total) -> None:
-        self.total_pages = max(1, -(-total // PAGE_SIZE))
-        self.tree.delete(*self.tree.get_children())
-        for row in rows:
-            self.tree.insert(
-                "", "end",
-                values=[_format_cell(row.get(c[0])) for c in TARGETS_COLUMNS],
-            )
-        if total == 0:
-            self.count_label.configure(
-                text="No targets — run matching + enrichment first."
-            )
-        else:
-            self.count_label.configure(text=f"{total:,} targets")
-        self.page_label.configure(text=f"Page {self.page} of {self.total_pages}")
-        self.btn_prev.configure(state="normal" if self.page > 1 else "disabled")
-        self.btn_next.configure(state="normal" if self.page < self.total_pages else "disabled")
-
-    def _on_export(self) -> None:
-        path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile="tiered_targets_export.csv",
-        )
-        if not path:
-            return
-        filters = self._get_filters()
-        for k in ("page", "page_size", "sort_by", "sort_order"):
-            filters.pop(k, None)
-        self.app._set_status("Exporting targets...")
-
-        def worker(cancel_event: threading.Event | None = None) -> None:
-            try:
-                n = self.ch.export_tiered_targets_csv(path, **filters)
-                self.app.root.after(0, lambda: self.app._set_status(f"Exported {n:,} targets to {path}"))
-            except Exception as exc:
-                logger.exception("Targets export error")
-                err = f"Export error: {exc}"
-                self.app.root.after(0, lambda m=err: self.app._set_status(m, error=True))
-
-        self.app._register_task(worker, label="Targets export", can_cancel=False)
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Upload List pane

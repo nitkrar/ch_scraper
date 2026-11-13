@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
+import time
 import zipfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -25,7 +27,15 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://download.companieshouse.gov.uk"
 PARTS = 7
 CHUNK_SIZE = 256 * 1024  # 256 KB
-_MAX_DOWNLOAD_RETRIES = 2
+_MAX_DOWNLOAD_ATTEMPTS = 3
+
+
+class IncompleteDownloadError(RuntimeError):
+    """The server closed the stream before sending the advertised size.
+
+    The partial file is kept, so the next attempt resumes from where this
+    one stopped.
+    """
 
 
 def _zip_filename(month: str, part: int) -> str:
@@ -161,14 +171,10 @@ def _download_file(
                         f"({downloaded // 1024 // 1024}MB / {total // 1024 // 1024}MB)"
                     )
 
-    # Verify final size
     final_size = dest.stat().st_size
     if total and final_size != total:
-        logger.warning(
-            "Size mismatch for %s: expected %d, got %d",
-            dest.name,
-            total,
-            final_size,
+        raise IncompleteDownloadError(
+            f"{dest.name}: expected {total} bytes, got {final_size}"
         )
 
 
@@ -235,6 +241,46 @@ def _extract_zip(zip_path: Path, extract_dir: Path) -> list[Path]:
     return csv_files
 
 
+def _download_with_retries(
+    client: httpx.Client,
+    url: str,
+    dest: Path,
+    *,
+    progress: Progress | None,
+    progress_callback: callable | None,
+    report: callable,
+) -> None:
+    """Download one part, retrying network errors and short downloads.
+
+    Each attempt re-checks the size on the server (HEAD) and resumes a
+    partial file, so a retry continues rather than starting over.
+    """
+    for attempt in range(1, _MAX_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            _download_file(
+                client, url, dest,
+                progress=progress,
+                progress_callback=progress_callback,
+            )
+            return
+        except (httpx.HTTPError, IncompleteDownloadError) as exc:
+            if attempt == _MAX_DOWNLOAD_ATTEMPTS:
+                logger.error(
+                    "Failed to download %s after %d attempts: %s",
+                    dest.name, attempt, exc,
+                )
+                raise
+            pause = 2**attempt
+            logger.warning(
+                "Attempt %d/%d failed for %s (%s), retrying in %ss",
+                attempt, _MAX_DOWNLOAD_ATTEMPTS, dest.name, exc, pause,
+            )
+            report(
+                f"Retry {attempt}/{_MAX_DOWNLOAD_ATTEMPTS - 1} for {dest.name}..."
+            )
+            time.sleep(pause)
+
+
 def download_bulk_data(
     data_dir: str | Path,
     month: str | None = None,
@@ -262,7 +308,8 @@ def download_bulk_data(
 
     Raises:
         RuntimeError: If the month cannot be detected.
-        httpx.HTTPError: On download failures.
+        httpx.HTTPError: On download failures after retries.
+        IncompleteDownloadError: If a part is still short after retries.
         zipfile.BadZipFile: If ``strict=True`` and a ZIP is corrupt.
     """
     data_dir = Path(data_dir)
@@ -283,43 +330,9 @@ def download_bulk_data(
         timeout=httpx.Timeout(connect=30, read=600, write=30, pool=30),
         follow_redirects=True,
     ) as client:
-        if progress_callback:
-            # GUI path: use callback for progress, no rich output
-            for part in range(1, PARTS + 1):
-                filename = _zip_filename(month, part)
-                url = f"{BASE_URL}/{filename}"
-                dest = target_dir / filename
-
-                existing_csv = _extracted_csv(target_dir, filename)
-                if existing_csv is not None:
-                    progress_callback(f"Part {part}/{PARTS} already downloaded")
-                    logger.info("Already extracted: %s", existing_csv.name)
-                    all_csv_files.append(existing_csv)
-                    if not keep_zips:
-                        dest.unlink(missing_ok=True)
-                    continue
-
-                progress_callback(f"Downloading part {part}/{PARTS}: {filename}")
-
-                last_exc: httpx.HTTPError | None = None
-                for attempt in range(1, _MAX_DOWNLOAD_RETRIES + 1):
-                    try:
-                        _download_file(
-                            client, url, dest,
-                            progress_callback=progress_callback,
-                        )
-                        zip_paths.append(dest)
-                        last_exc = None
-                        break
-                    except httpx.HTTPError as exc:
-                        last_exc = exc
-                        progress_callback(
-                            f"Retry {attempt}/{_MAX_DOWNLOAD_RETRIES} for {filename}..."
-                        )
-                if last_exc is not None:
-                    raise last_exc
-        else:
-            # CLI path: use rich Progress bars in terminal
+        # The GUI passes a callback; the CLI shows rich progress bars.
+        progress = None
+        if progress_callback is None:
             progress = Progress(
                 TextColumn("[bold blue]{task.description}"),
                 BarColumn(),
@@ -327,43 +340,31 @@ def download_bulk_data(
                 TransferSpeedColumn(),
                 TimeRemainingColumn(),
             )
-            with progress:
-                for part in range(1, PARTS + 1):
-                    filename = _zip_filename(month, part)
-                    url = f"{BASE_URL}/{filename}"
-                    dest = target_dir / filename
+        report = progress_callback or (lambda _msg: None)
+        with progress if progress is not None else contextlib.nullcontext():
+            for part in range(1, PARTS + 1):
+                filename = _zip_filename(month, part)
+                dest = target_dir / filename
 
-                    existing_csv = _extracted_csv(target_dir, filename)
-                    if existing_csv is not None:
-                        logger.info("Already extracted: %s", existing_csv.name)
-                        all_csv_files.append(existing_csv)
-                        if not keep_zips:
-                            dest.unlink(missing_ok=True)
-                        continue
+                existing_csv = _extracted_csv(target_dir, filename)
+                if existing_csv is not None:
+                    report(f"Part {part}/{PARTS} already downloaded")
+                    logger.info("Already extracted: %s", existing_csv.name)
+                    all_csv_files.append(existing_csv)
+                    if not keep_zips:
+                        dest.unlink(missing_ok=True)
+                    continue
 
-                    last_exc = None
-                    for attempt in range(1, _MAX_DOWNLOAD_RETRIES + 1):
-                        try:
-                            _download_file(client, url, dest, progress)
-                            zip_paths.append(dest)
-                            last_exc = None
-                            break
-                        except httpx.HTTPError as exc:
-                            last_exc = exc
-                            logger.warning(
-                                "Attempt %d/%d failed for %s: %s",
-                                attempt,
-                                _MAX_DOWNLOAD_RETRIES,
-                                filename,
-                                exc,
-                            )
-                    if last_exc is not None:
-                        logger.error(
-                            "Failed to download %s after %d attempts",
-                            filename,
-                            _MAX_DOWNLOAD_RETRIES,
-                        )
-                        raise last_exc
+                report(f"Downloading part {part}/{PARTS}: {filename}")
+                _download_with_retries(
+                    client,
+                    f"{BASE_URL}/{filename}",
+                    dest,
+                    progress=progress,
+                    progress_callback=progress_callback,
+                    report=report,
+                )
+                zip_paths.append(dest)
 
     # Extract all ZIPs
     if zip_paths:

@@ -8,6 +8,8 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from ch_bulk.companies_house import downloader
 from ch_bulk.companies_house.downloader import download_bulk_data
 from ch_bulk.core.paths import ch_input_dir
@@ -124,6 +126,89 @@ class ExtractionIsAtomicTests(unittest.TestCase):
                     downloader._extract_zip(zip_path, out_dir)
 
             self.assertFalse((out_dir / _csv_name(1)).exists())
+
+
+def _server(full: bytes, *, truncate_first_get_to: int | None = None):
+    """A fake download server that honours HEAD and Range requests.
+
+    The first GET can be cut short while still advertising the full length,
+    which is what a dropped connection looks like.
+    """
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={"content-length": str(len(full))})
+        range_header = request.headers.get("Range")
+        start = int(range_header.split("=")[1].rstrip("-")) if range_header else 0
+        body = full[start:]
+        status = 206 if range_header else 200
+        gets = [r for r in requests if r.method == "GET"]
+        sent = body
+        if truncate_first_get_to is not None and len(gets) == 1:
+            sent = body[:truncate_first_get_to]
+        return httpx.Response(
+            status, headers={"content-length": str(len(body))}, content=sent
+        )
+
+    return httpx.Client(transport=httpx.MockTransport(handler)), requests
+
+
+class IncompleteDownloadTests(unittest.TestCase):
+    URL = "https://download.example/part1.zip"
+
+    def test_short_download_is_an_error(self):
+        client, _ = _server(b"x" * 100, truncate_first_get_to=40)
+        with tempfile.TemporaryDirectory() as tmpdir, client:
+            dest = Path(tmpdir) / "part1.zip"
+            with self.assertRaises(downloader.IncompleteDownloadError):
+                downloader._download_file(client, self.URL, dest)
+
+    def test_short_download_is_retried_and_resumed(self):
+        full = bytes(range(100))
+        client, requests = _server(full, truncate_first_get_to=40)
+        messages: list[str] = []
+        # download_bulk_data opens (and closes) the client itself.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(downloader.httpx, "Client", return_value=client), patch.object(
+                downloader, "_extract_zip", side_effect=_fake_extract
+            ), patch.object(downloader.time, "sleep"):
+                download_bulk_data(
+                    data_dir=tmpdir, month=MONTH, keep_zips=True,
+                    progress_callback=messages.append,
+                )
+            part1 = ch_input_dir(tmpdir) / f"BasicCompanyData-{MONTH}-01-part1_7.zip"
+            self.assertEqual(part1.read_bytes(), full)
+        resumed = [r for r in requests if r.headers.get("Range")]
+        self.assertEqual([r.headers["Range"] for r in resumed], ["bytes=40-"])
+
+    def test_cli_and_gui_paths_retry_the_same_way(self):
+        for callback in (None, lambda _msg: None):
+            with self.subTest(gui=callback is not None), tempfile.TemporaryDirectory() as tmpdir:
+                failures = [downloader.IncompleteDownloadError("short"), httpx.ConnectError("x")]
+
+                def flaky(*_args, **_kwargs):
+                    if failures:
+                        raise failures.pop(0)
+
+                with patch.object(downloader, "_download_file", side_effect=flaky) as dl, \
+                        patch.object(downloader, "_extract_zip", side_effect=_fake_extract), \
+                        patch.object(downloader.time, "sleep"):
+                    result = download_bulk_data(
+                        data_dir=tmpdir, month=MONTH, progress_callback=callback,
+                    )
+                self.assertEqual(len(result), 7)
+                self.assertEqual(dl.call_count, 9)
+
+    def test_gives_up_after_the_last_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(
+                downloader, "_download_file",
+                side_effect=downloader.IncompleteDownloadError("short"),
+            ), patch.object(downloader.time, "sleep"):
+                with self.assertRaises(downloader.IncompleteDownloadError):
+                    download_bulk_data(data_dir=tmpdir, month=MONTH)
 
 
 if __name__ == "__main__":

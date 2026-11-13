@@ -30,36 +30,20 @@ SELECT
     "CompanyCategory"                       AS company_type,
 
     -- SIC codes: extract numeric prefix + keep full text
-    CASE
-        WHEN "SICCode.SicText_1" IS NOT NULL
-             AND regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1) != ''
-        THEN regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1)
-        ELSE NULL
-    END                                     AS sic_code_1,
+    NULLIF(regexp_extract("SICCode.SicText_1", '^\s*(\d+)', 1), '')
+                                            AS sic_code_1,
     "SICCode.SicText_1"                     AS sic_text_1,
 
-    CASE
-        WHEN "SICCode.SicText_2" IS NOT NULL
-             AND regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1) != ''
-        THEN regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1)
-        ELSE NULL
-    END                                     AS sic_code_2,
+    NULLIF(regexp_extract("SICCode.SicText_2", '^\s*(\d+)', 1), '')
+                                            AS sic_code_2,
     "SICCode.SicText_2"                     AS sic_text_2,
 
-    CASE
-        WHEN "SICCode.SicText_3" IS NOT NULL
-             AND regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1) != ''
-        THEN regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1)
-        ELSE NULL
-    END                                     AS sic_code_3,
+    NULLIF(regexp_extract("SICCode.SicText_3", '^\s*(\d+)', 1), '')
+                                            AS sic_code_3,
     "SICCode.SicText_3"                     AS sic_text_3,
 
-    CASE
-        WHEN "SICCode.SicText_4" IS NOT NULL
-             AND regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1) != ''
-        THEN regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1)
-        ELSE NULL
-    END                                     AS sic_code_4,
+    NULLIF(regexp_extract("SICCode.SicText_4", '^\s*(\d+)', 1), '')
+                                            AS sic_code_4,
     "SICCode.SicText_4"                     AS sic_text_4,
 
     -- Address fields (individual + combined)

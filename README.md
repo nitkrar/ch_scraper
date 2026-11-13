@@ -1,8 +1,36 @@
 # ch-bulk
 
-Download and query UK Companies House bulk data by SIC code.
+Builds a local DuckDB database of UK care companies from public data, enriches
+it, and screens it into tiered acquisition targets. It has a desktop GUI
+(`ch-bulk ui`), a CLI (`ch-bulk`), and a Python API (`ChBulk`).
 
-Uses [DuckDB](https://duckdb.org/) for fast CSV ingestion and analytical queries. Downloads the free monthly bulk data snapshots from Companies House (~470 MB) and builds a local database you can query by SIC code.
+What it does:
+
+- **Companies House bulk sync** — downloads the free monthly Companies House
+  snapshot (~470 MB) and loads it into DuckDB, keeping history across months.
+  Query by SIC code, status, postcode and more.
+- **CQC and HSCA** — downloads the CQC care directory and the HSCA active
+  locations file, and enriches providers and locations from the CQC API.
+- **Matching** — links active SIC 88100 companies to CQC providers
+  (`ch-bulk match`).
+- **Director and financials enrichment** — fetches directors (ages) from the
+  Companies House API, parses filed accounts for revenue, employees and
+  balance-sheet fields, and estimates revenue from employee count where no
+  figure is filed.
+- **Website classification** — finds each company's website (DuckDuckGo
+  search) and classifies its main service (domiciliary, supported living,
+  residential, mixed) with a local LLM.
+- **Tiered targets** — scores matched companies on service mix, director age
+  and size, and assigns Tier 1-3. Browse and export them in the GUI's Targets
+  pane.
+- **Upload List** — in the GUI, pick a CSV or Excel file of company numbers;
+  it fetches whatever is missing and writes one standard profile row per
+  company to an Excel workbook. A blank template is available from the same
+  pane.
+
+API keys for Companies House and CQC go in `data/settings.json` (copy
+`data/settings.example.json`). Website classification needs a local LLM
+server; see step 5 below.
 
 ## Install
 
@@ -137,12 +165,18 @@ when the chosen Python lacks Tkinter — see the prerequisites above.
 cp data/settings.example.json data/settings.json
 ```
 
-3. Load the bulk source data first. In the current CLI surface `ch-bulk sync` refreshes the Companies House bulk data. After that, run the CQC and HSCA bulk steps from your local workflow before importing or rebuilding derived tables.
+3. Load the bulk source data first:
+
+```bash
+ch-bulk sync            # Companies House
+ch-bulk cqc-bulk sync   # CQC care directory
+ch-bulk hsca-bulk sync  # HSCA active locations
+```
 
 4. Pick one rebuild path:
 
 - Full rebuild: run the match and enrichment/classification pipeline locally. Expect roughly 6-8 hours end-to-end when the CH/CQC API enrichers and website classification all need to be regenerated.
-- Option B, migration bundle: run the bulk sync workflow first (`ch-bulk sync` for Companies House, plus the CQC and HSCA bulk steps you already use locally), then import a Parquet bundle with `ch-bulk migration import --bundle /path/to/portable-bundle`. The bundle only contains the portable derived tables, so importing before bulk sync is invalid. After import, run `ch-bulk match --mode all` to refresh deterministic matches from local bulk plus imported API data.
+- Option B, migration bundle: run the three bulk syncs from step 3 first, then import a Parquet bundle with `ch-bulk migration import --bundle /path/to/portable-bundle`. The bundle only contains the portable derived tables, so importing before bulk sync is invalid. After import, run `ch-bulk match --mode all` to refresh deterministic matches from local bulk plus imported API data.
 
 5. Start the local LLM before website classification runs. A typical `llama.cpp` flow is:
 
@@ -169,7 +203,9 @@ ch-bulk match
 ch-bulk cqc-enrich providers --mode incremental
 ch-bulk cqc-enrich locations --mode incremental
 ch-bulk ch-enrich directors
-ch-bulk ch-enrich revenue
+ch-bulk enrich-financials --mode incremental
+ch-bulk ch-enrich revenue          # estimate revenue from employee count where none was filed
+ch-bulk find-websites --mode incremental
 ch-bulk classify --mode incremental
 ch-bulk migration export --bundle data/migration/portable-bundle
 ch-bulk migration import --bundle data/migration/portable-bundle

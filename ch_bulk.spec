@@ -1,7 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for CH Bulk desktop app (Tkinter GUI)."""
 
+import tomllib
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+
+with open(Path(SPECPATH) / "pyproject.toml", "rb") as f:
+    VERSION = tomllib.load(f)["project"]["version"]
 
 # Collect DuckDB native libraries — PyInstaller misses these by default
 duckdb_datas = collect_data_files("duckdb")
@@ -22,9 +28,9 @@ a = Analysis(
     hiddenimports=[
         "ch_bulk",
         "ch_bulk.api",
-        "ch_bulk.query",
-        "ch_bulk.downloader",
-        "ch_bulk.processor",
+        "ch_bulk.companies_house.query",
+        "ch_bulk.companies_house.downloader",
+        "ch_bulk.companies_house.processor",
         "ch_bulk.gui",
         "duckdb",
         "httpx",
@@ -66,8 +72,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "CH Bulk",
         "CFBundleDisplayName": "Companies House Bulk Data Explorer",
-        "CFBundleVersion": "0.1.0",
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleVersion": VERSION,
+        "CFBundleShortVersionString": VERSION,
         "NSHighResolutionCapable": True,
     },
 )

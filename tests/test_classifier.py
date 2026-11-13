@@ -393,6 +393,58 @@ class WebsiteClassifierTests(unittest.TestCase):
 
         self.assertIsNone(_extract_json_object("not valid json"))
 
+    def test_extract_json_object_finds_object_amid_surrounding_text(self):
+        obj = {"verdict": "Majority residential", "evidence": "a {braced} note"}
+        cases = [
+            f"```json\n{json.dumps(obj)}\n```",
+            f"Here is my answer: {json.dumps(obj)} Hope that helps.",
+            "Sets like {1, 2} aside, " + repr(obj),
+            json.dumps({"meta": {"n": 1}, **obj}),
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                parsed = _extract_json_object(raw)
+                self.assertIsNotNone(parsed)
+                self.assertEqual(parsed["verdict"], obj["verdict"])
+                self.assertEqual(parsed["evidence"], obj["evidence"])
+
+        self.assertIsNone(_extract_json_object('{"evidence": "no verdict key"}'))
+
+    def test_call_llm_sends_explicit_zero_temperature_and_max_tokens(self):
+        import httpx
+
+        from ch_bulk.web.classifier_llm import _call_llm
+
+        sent: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": '{"verdict": "x"}'}}]},
+            )
+
+        client = httpx.Client(
+            base_url="http://llm.test/", transport=httpx.MockTransport(handler)
+        )
+        try:
+            for config in (
+                {"temperature": 0, "max_tokens": 0},
+                {"temperature": 0.7, "max_tokens": 50},
+                {"temperature": None, "max_tokens": None},
+                {},
+            ):
+                _call_llm(client, content="text", model="m", llm_config=config)
+        finally:
+            client.close()
+
+        got = [(p["temperature"], p["max_tokens"]) for p in sent]
+        self.assertEqual(got[0], (0.0, 0))
+        self.assertEqual(got[1], (0.7, 50))
+        # Missing values fall back to the same non-zero defaults.
+        self.assertEqual(got[2], got[3])
+        self.assertNotIn(0, got[2])
+
     def test_select_company_inputs_incremental_requires_primary_matched_url(self):
         db_path, tmpdir = self._create_db()
         con = duckdb.connect(str(db_path))
