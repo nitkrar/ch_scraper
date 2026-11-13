@@ -19,7 +19,7 @@ Do not renumber items; add new findings at the end.
 | AUDIT-05 | High | Fixed | HTTP retry loops do not retry transport errors; `Retry-After` parsing is integer-only and uncapped |
 | AUDIT-06 | Medium | Fixed | Officers and filing-history lists fetch one page only |
 | AUDIT-07 | Medium | Fixed | Read queries open DuckDB read-write; compaction recovery and missing-table handling are inconsistent |
-| AUDIT-08 | High | Partial | API keys stored unencrypted and shown in plaintext in the GUI |
+| AUDIT-08 | High | Removed | API keys stored unencrypted and shown in plaintext in the GUI |
 | AUDIT-09 | Low | Open | Website search checks reachability for every result before scoring or denylisting |
 | AUDIT-10 | Low | Open | Classifier fetches seven pages per site and shares one HTTP/LLM client across threads |
 | AUDIT-11 | Medium | Fixed | Bulk download is sequential with duplicated GUI/CLI loops; size mismatch is a warning only |
@@ -27,7 +27,7 @@ Do not renumber items; add new findings at the end.
 | AUDIT-13 | Low | Fixed | GUI browse panes duplicate query, display, sort, paging, and export logic |
 | AUDIT-14 | Low | Removed | `process()` re-reads and re-upserts every month on each run; no processed-month checkpoint |
 | AUDIT-15 | Low | Fixed | Minor correctness issues: duplicated regex extraction, silent CSV error drops, LLM JSON parsing cost, `or`-defaults |
-| AUDIT-16 | Medium | Open | `query_by_sic` loads all rows into memory (`SELECT *` + `fetchall`) |
+| AUDIT-16 | Medium | Fixed | `query_by_sic` loads all rows into memory (`SELECT *` + `fetchall`) |
 | AUDIT-17 | Feature | Open | No stale-enrichment view or selective re-enrichment |
 | AUDIT-18 | Feature | Open | No shared HTTP retry/throttle layer (follows from AUDIT-05) |
 | AUDIT-19 | Feature | Open | Website search has a single DuckDuckGo HTML backend with no retry |
@@ -208,6 +208,10 @@ settings files to owner-only permissions on POSIX (pinned by
 re-saved, and the keys stored in it have not been rotated — both
 need the user to act.
 
+Removed by the user (2026-11-14): the remaining steps (re-saving
+the existing settings file, rotating keys) are not being pursued. The
+masking and owner-only permissions above stay in place.
+
 ## Inefficiencies and duplication
 
 ### AUDIT-09 — Reachability is checked before scoring or denylisting
@@ -311,6 +315,16 @@ silently (not named in this item). Pinned by
 Evidence: `query_by_sic` uses `SELECT *` plus `fetchall()`, while
 the export path already streams with `COPY`. Fix: add an
 iterator/chunked query API and use it for large result sets.
+
+Fixed (2026-11-14), differently from the suggested iterator: the
+only caller that loaded a large result was `ch-bulk query`, which
+fetched every match to print 50 rows and a total. It now fetches at
+most 50 rows and gets the total from the new `count_by_sic` (a
+`COUNT(*)` over the same query), and says to use `--output-csv` when
+there are more. `query_by_sic` still returns a list (its documented
+contract, used by `ChBulk.query`); its docstring now points to
+`count_by_sic` and the streaming CSV export. No iterator API was
+added because nothing needs one. Pinned by `tests/test_cli_query.py`.
 
 ## Features
 

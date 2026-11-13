@@ -58,6 +58,24 @@ def _build_sic_where(
     return f"({conditions})", params
 
 
+def _sic_select_sql(
+    sic_codes: str | list[str],
+    status: str | None,
+    limit: int | None,
+) -> tuple[str, list]:
+    """The ordered `SELECT * FROM companies` for a SIC search, and its params."""
+    limit = validate_limit(limit)
+    where_clause, params = _build_sic_where(_normalise_sic_codes(sic_codes))
+    sql = f"SELECT * FROM companies WHERE {where_clause}"
+    if status:
+        sql += " AND company_status = ?"
+        params.append(status)
+    sql += " ORDER BY company_name"
+    if limit is not None:
+        sql += f" LIMIT {limit}"
+    return sql, params
+
+
 def query_by_sic(
     db_path: str | Path,
     sic_codes: str | list[str],
@@ -68,6 +86,10 @@ def query_by_sic(
 
     Searches across all four SIC code columns (a company can have up
     to 4 SIC codes).  Uses parameterized queries to prevent SQL injection.
+
+    Every matching row is loaded into memory, so pass a `limit` for broad
+    codes; use `count_by_sic` for the total and `export_query_csv` to
+    write all rows.
 
     Args:
         db_path: Path to the DuckDB database file.
@@ -87,17 +109,7 @@ def query_by_sic(
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
-    limit = validate_limit(limit)
-    codes = _normalise_sic_codes(sic_codes)
-    where_clause, params = _build_sic_where(codes)
-
-    sql = f"SELECT * FROM companies WHERE {where_clause}"
-    if status:
-        sql += " AND company_status = ?"
-        params.append(status)
-    sql += " ORDER BY company_name"
-    if limit is not None:
-        sql += f" LIMIT {limit}"
+    sql, params = _sic_select_sql(sic_codes, status, limit)
 
     def _run(con: duckdb.DuckDBPyConnection) -> list[dict]:
         result = con.execute(sql, params)
@@ -106,6 +118,24 @@ def query_by_sic(
         return [dict(zip(columns, row)) for row in rows]
 
     return with_duckdb_connection(db_path, _run)
+
+
+def count_by_sic(
+    db_path: str | Path,
+    sic_codes: str | list[str],
+    status: str | None = "Active",
+    limit: int | None = None,
+) -> int:
+    """Number of rows `query_by_sic` would return, without loading them."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+
+    sql, params = _sic_select_sql(sic_codes, status, limit)
+    return with_duckdb_connection(
+        db_path,
+        lambda con: con.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0],
+    )
 
 
 def export_query_csv(

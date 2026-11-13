@@ -19,6 +19,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+# Rows `ch-bulk query` prints; use --output-csv for the full result.
+DISPLAY_LIMIT = 50
 cqc_enrich_app = typer.Typer(help="CQC API enrichment commands.")
 cqc_bulk_app = typer.Typer(help="CQC bulk directory commands.")
 ch_enrich_app = typer.Typer(help="Companies House enrichment commands.")
@@ -120,12 +123,13 @@ def query(
             console.print("[red]Database not found. Run 'ch-bulk sync' first.[/]")
         return
 
+    # Show the first page only; the total comes from a COUNT, so a broad
+    # code doesn't load every matching company into memory.
+    from ch_bulk.companies_house.query import count_by_sic
+    shown = DISPLAY_LIMIT if limit is None else min(limit, DISPLAY_LIMIT)
     try:
-        results = ch.query(
-            sic_codes=sic_codes,
-            status=status,
-            limit=limit,
-        )
+        results = ch.query(sic_codes=sic_codes, status=status, limit=shown)
+        total = count_by_sic(resolved_db_path, sic_codes, status=status, limit=limit)
     except FileNotFoundError:
         console.print("[red]Database not found. Run 'ch-bulk sync' first.[/]")
         return
@@ -141,8 +145,7 @@ def query(
     table.add_column("Postcode")
     table.add_column("SIC 1")
 
-    display_limit = min(len(results), 50)
-    for r in results[:display_limit]:
+    for r in results:
         table.add_row(
             str(r.get("company_number", "")),
             str(r.get("company_name", "")),
@@ -152,7 +155,9 @@ def query(
         )
 
     console.print(table)
-    console.print(f"\n[bold]{len(results):,} total results[/]")
+    console.print(f"\n[bold]{total:,} total results[/]")
+    if total > len(results):
+        console.print(f"Showing the first {len(results):,}. Use --output-csv to export all.")
 
 
 @app.command()
